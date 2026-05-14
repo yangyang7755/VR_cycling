@@ -47,23 +47,58 @@ class BikeDeviceHandler:
         self.cpvs_handler = cpvs_handler
     
     async def set_resistance_level(self, ftms_service, client, resistance_level: int):
-        """Set resistance for this specific device"""
+        """
+        Set bike simulation parameters using FTMS Indoor Bike Simulation (opcode 0x11).
+        The resistance_level here is actually the GRADIENT in units of 0.1%
+        (e.g., 50 = 5.0% grade, 100 = 10.0% grade).
+        
+        This makes the bike feel like riding uphill — much more realistic than
+        the basic resistance level command (0x04).
+        """
         try:
-            resistance_level = max(0, min(100, int(resistance_level)))
+            # Convert resistance_level to grade (it comes as 0-100 representing 0-10% grade)
+            # Map: 0 → 0%, 30 → 0% (flat baseline), 55 → 5%, 80 → 10%
+            # Actually, let's just use it directly as grade × 10
+            # Unity sends: flatResistance(30) + slope% × resistancePerPercent(5)
+            # So resistance 30 = flat, 55 = 5% grade, 80 = 10% grade
+            # Convert back to grade: grade% = (resistance - 30) / 5
+            grade_percent = max(0.0, (resistance_level - 30) / 5.0)
             
-            if hasattr(ftms_service, 'set_target_resistance_level'):
-                await ftms_service.set_target_resistance_level(resistance_level)
-                print(f"[{self.device_name}] Resistance set to: {resistance_level}%")
-                return True
-            else:
-                control_point_uuid = "00002ad9-0000-1000-8000-00805f9b34fb"
-                command = bytes([0x04, resistance_level])
-                await client.write_gatt_char(control_point_uuid, command)
-                print(f"[{self.device_name}] Resistance set to: {resistance_level}%")
-                return True
+            # FTMS Indoor Bike Simulation Parameters (opcode 0x11)
+            # Format: [0x11, wind_low, wind_high, grade_low, grade_high, crr, cw]
+            control_point_uuid = "00002ad9-0000-1000-8000-00805f9b34fb"
+            
+            # Grade in units of 0.01% (sint16): 5.0% = 500
+            grade_raw = int(grade_percent * 100)  # e.g., 5.0% → 500
+            grade_bytes = grade_raw.to_bytes(2, byteorder='little', signed=True)
+            
+            # Wind speed = 0 m/s
+            wind_bytes = (0).to_bytes(2, byteorder='little', signed=True)
+            
+            # Rolling resistance coefficient: 0.004 (typical road bike)
+            crr = 40  # units of 0.0001
+            
+            # Wind resistance coefficient: 0.51 kg/m (typical cyclist)
+            cw = 51  # units of 0.01
+            
+            command = bytes([0x11]) + wind_bytes + grade_bytes + bytes([crr, cw])
+            
+            await client.write_gatt_char(control_point_uuid, command)
+            print(f"[{self.device_name}] Simulation: grade={grade_percent:.1f}% (raw resistance input={resistance_level})")
+            return True
+            
         except Exception as e:
-            print(f"[{self.device_name}] Failed to set resistance: {e}")
-            return False
+            print(f"[{self.device_name}] Failed to set simulation params: {e}")
+            # Fallback to basic resistance command
+            try:
+                control_point_uuid = "00002ad9-0000-1000-8000-00805f9b34fb"
+                command = bytes([0x04, max(0, min(200, resistance_level))])
+                await client.write_gatt_char(control_point_uuid, command)
+                print(f"[{self.device_name}] Fallback: basic resistance={resistance_level}")
+                return True
+            except Exception as e2:
+                print(f"[{self.device_name}] Fallback also failed: {e2}")
+                return False
     
     def clean_dict(self, raw_data):
         """Convert measurement to clean dictionary"""

@@ -267,6 +267,26 @@ public class StartScreenUI : MonoBehaviour
         // Hide start screen
         HideStartScreen();
 
+        // Start the HillClimbExperiment with participant data
+        HillClimbExperiment hillExp = FindObjectOfType<HillClimbExperiment>();
+        if (hillExp != null)
+        {
+            hillExp.StartBlock(currentData.participantID, currentData.trialNumber, HillClimbExperiment.ExperimentGroup.Control);
+            Debug.Log($"[StartScreenUI] Started HillClimbExperiment: {currentData.participantID}, Block {currentData.trialNumber}");
+        }
+        else
+        {
+            // Fallback to ExperimentController
+            ExperimentController expController = FindObjectOfType<ExperimentController>();
+            if (expController != null)
+            {
+                expController.SetParticipantID(currentData.participantID);
+                expController.SetBlockNumber(currentData.trialNumber);
+                expController.StartExperiment();
+                Debug.Log($"[StartScreenUI] Started ExperimentController: {currentData.participantID}, Block {currentData.trialNumber}");
+            }
+        }
+
         // Optional: Trigger event for other scripts
         OnTrialStarted?.Invoke(currentData);
     }

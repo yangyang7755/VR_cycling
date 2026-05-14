@@ -31,8 +31,8 @@ public class BluetoothConnectionUI : MonoBehaviour
     [SerializeField] private float dataTimeoutSeconds = 5f;
 
     [Header("Python Auto-Launch")]
-    [Tooltip("Automatically launch the Python BLE bridge on start")]
-    [SerializeField] private bool autoLaunchPython = true;
+    [Tooltip("Automatically launch the Python BLE bridge on start. Disable this if you run main.py manually.")]
+    [SerializeField] private bool autoLaunchPython = false;
 
     [Tooltip("Path to Python executable (leave empty to use 'python3')")]
     [SerializeField] private string pythonPath = "";

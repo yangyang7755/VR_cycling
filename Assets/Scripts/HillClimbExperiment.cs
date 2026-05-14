@@ -299,7 +299,18 @@ public class HillClimbExperiment : MonoBehaviour
     {
         participantID = pid;
         blockNumber = block;
-        group = grp;
+        
+        // Auto-assign group based on participant number:
+        // Odd participant numbers → Reward (coins visible)
+        // Even participant numbers → Control (no coins)
+        int participantNum = 0;
+        // Extract number from participant ID (e.g., "P001" → 1, "P12" → 12, "3" → 3)
+        string numStr = System.Text.RegularExpressions.Regex.Replace(pid, "[^0-9]", "");
+        if (!string.IsNullOrEmpty(numStr))
+            int.TryParse(numStr, out participantNum);
+        
+        group = (participantNum % 2 != 0) ? ExperimentGroup.Reward : ExperimentGroup.Control;
+        Debug.Log($"[HillExperiment] Participant {pid} (number={participantNum}) → Group: {group} (odd=Reward/coins, even=Control)");
         
         GenerateConditionOrder();
         currentConditionIndex = 0;
@@ -433,8 +444,8 @@ public class HillClimbExperiment : MonoBehaviour
                 break;
                 
             case Phase.HillCue:
-                // Wait for keypress to continue
-                if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.Space) || Time.time - phaseStartTime > 8f)
+                // Auto-transition to hill climb after brief notification (no keypress needed)
+                if (Time.time - phaseStartTime > 2f)
                     SetPhase(Phase.HillClimb);
                 break;
                 
@@ -451,9 +462,21 @@ public class HillClimbExperiment : MonoBehaviour
                 
             case Phase.RewardRating:
                 // Wait for reward VAS to be dismissed
-                if (rewardVAS != null && !rewardVAS.IsShowing())
+                if (rewardVAS != null)
                 {
-                    FinishCondition();
+                    // Give VAS at least 1 second to appear before checking if dismissed
+                    if (Time.time - phaseStartTime > 1f && !rewardVAS.IsShowing())
+                    {
+                        FinishCondition();
+                    }
+                }
+                else
+                {
+                    // No VAS assigned — auto-proceed after 3 seconds
+                    if (Time.time - phaseStartTime > 3f)
+                    {
+                        FinishCondition();
+                    }
                 }
                 break;
         }
@@ -462,6 +485,20 @@ public class HillClimbExperiment : MonoBehaviour
         if (currentPhase == Phase.HillClimb || currentPhase == Phase.FlatApproach)
         {
             LogDataPoint("");
+        }
+        
+        // Animate coins: spin and float up/down
+        foreach (GameObject coin in activeCoinObjects)
+        {
+            if (coin != null && coin.activeSelf)
+            {
+                // Spin around Y axis
+                coin.transform.Rotate(0f, 180f * Time.deltaTime, 0f, Space.World);
+                // Bob up and down
+                Vector3 pos = coin.transform.position;
+                pos.y += Mathf.Sin(Time.time * 3f + coin.GetInstanceID()) * 0.005f;
+                coin.transform.position = pos;
+            }
         }
     }
     
@@ -474,15 +511,12 @@ public class HillClimbExperiment : MonoBehaviour
 
         float elevGain = (cond.averageGradient / 100f) * cond.hillLengthMeters;
 
-        string cueMsg = $"⛰ CLIMB BEGINS\n\n" +
-                        $"Gradient: {cond.averageGradient}% ({(cond.isRolling ? "Rolling" : "Steady")})\n" +
-                        $"Distance: {cond.hillLengthMeters:F0}m\n" +
-                        $"Elevation gain: {elevGain:F0}m";
+        string cueMsg = $"⛰ CLIMB AHEAD\n\n" +
+                        $"Gradient: {cond.averageGradient}%\n" +
+                        $"({(cond.isRolling ? "Rolling" : "Steady")})";
 
         if (group == ExperimentGroup.Reward)
-            cueMsg += $"\n\nCoins: {cond.coinReward} 🪙";
-
-        cueMsg += "\n\nPress ENTER to start climbing";
+            cueMsg += $"\n\nCoins: 5 🪙";
 
         cueText.text = cueMsg;
         cuePanel.SetActive(true);
@@ -680,9 +714,8 @@ public class HillClimbExperiment : MonoBehaviour
 
         if (bikeController != null)
         {
-            bikeController.ResetCourse();
-            bikeController.SetMaxCourseDistance(hillLength);
-            phaseStartDistance = bikeController.GetDistance();
+            // Set the max distance for the full condition (flat + hill)
+            bikeController.SetMaxCourseDistance(flatApproachLength + hillLength);
         }
 
         // Also update elevation bar
@@ -694,21 +727,40 @@ public class HillClimbExperiment : MonoBehaviour
     {
         float hillDist = dist - phaseStartDistance;
         
-        // Check quit (10s no pedaling)
-        if (speed < quitSpeedThreshold)
+        // Quit detection: 5s no pedaling triggers a 5s countdown, then abandon
+        if (!simulationModeActive && speed < quitSpeedThreshold)
         {
             noSpeedTimer += Time.deltaTime;
-            if (noSpeedTimer >= quitTimeThreshold)
+            
+            // After 5s of no pedaling, show countdown
+            if (noSpeedTimer >= 5f)
             {
-                Debug.Log($"[HillExperiment] QUIT detected — no pedaling for {quitTimeThreshold}s");
-                if (EventMarkerSender.Instance != null)
-                    EventMarkerSender.Instance.SendEvent("QUIT_DETECTED", $"no_speed_duration={noSpeedTimer:F1}");
-                SetPhase(Phase.Abandoned);
-                return;
+                float countdownRemaining = quitTimeThreshold - noSpeedTimer;
+                if (countdownRemaining > 0f)
+                {
+                    // Show countdown on cue panel
+                    cuePanel.SetActive(true);
+                    cueText.text = $"⚠ Resume pedaling!\n\nHill abandoned in: {Mathf.CeilToInt(countdownRemaining)}s";
+                }
+                
+                if (noSpeedTimer >= quitTimeThreshold)
+                {
+                    cuePanel.SetActive(false);
+                    Debug.Log($"[HillExperiment] QUIT — no pedaling for {quitTimeThreshold}s");
+                    if (EventMarkerSender.Instance != null)
+                        EventMarkerSender.Instance.SendEvent("QUIT_DETECTED", $"no_speed_duration={noSpeedTimer:F1}");
+                    SetPhase(Phase.Abandoned);
+                    return;
+                }
             }
         }
         else
         {
+            // Resumed pedaling — reset timer and hide countdown
+            if (noSpeedTimer >= 5f)
+            {
+                cuePanel.SetActive(false);
+            }
             noSpeedTimer = 0f;
         }
         
@@ -725,6 +777,12 @@ public class HillClimbExperiment : MonoBehaviour
             SetPhase(Phase.Completed);
         }
     }
+
+    // Helper to check if we're in simulation (don't trigger quit in sim mode)
+    private bool simulationModeActive
+    {
+        get { return bikeController != null && bikeController.IsSimulationMode(); }
+    }
     
     private void ShowCompletion(bool completed)
     {
@@ -740,8 +798,8 @@ public class HillClimbExperiment : MonoBehaviour
         }
         else
         {
-            completionText.text = "Hill Uncompleted!";
-            completionText.color = new Color(1f, 0.5f, 0.2f);
+            completionText.text = "Hill Incomplete!";
+            completionText.color = new Color(1f, 0.3f, 0.3f);
         }
         
         completionPanel.SetActive(true);
@@ -807,67 +865,123 @@ public class HillClimbExperiment : MonoBehaviour
         ClearCoins();
         if (group != ExperimentGroup.Reward) return;
         
-        float spacing = hillLength / (count + 1);
+        // Always 5 coins per condition
+        count = 5;
+        
+        // Generate random distances along the hill (sorted)
+        System.Random rng = new System.Random(currentConditionIndex * 100 + blockNumber);
+        List<float> coinDistances = new List<float>();
+        for (int i = 0; i < count; i++)
+        {
+            float minDist = hillLength * 0.1f;
+            float maxDist = hillLength * 0.9f;
+            float dist = minDist + (float)rng.NextDouble() * (maxDist - minDist);
+            coinDistances.Add(dist);
+        }
+        coinDistances.Sort();
         
         for (int i = 0; i < count; i++)
         {
-            float dist = spacing * (i + 1);
-            
-            // Create a simple coin (yellow cylinder)
+            // Create a flat coin (cylinder squashed flat, rotated to face camera)
             GameObject coin = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
             coin.name = $"Coin_{i}";
-            coin.transform.localScale = new Vector3(1f, 0.1f, 1f);
+            coin.transform.localScale = new Vector3(1.2f, 0.08f, 1.2f); // Flat disc
+            coin.transform.rotation = Quaternion.Euler(90f, 0f, 0f); // Face forward (vertical disc)
+            coin.transform.position = new Vector3(0f, -100f, 0f); // Hidden until positioned
             
-            // Position will be updated in CheckCoinCollection based on spline
-            coin.transform.position = Vector3.zero; // placeholder
-            
-            // Material
-            GameObject tempPrim = GameObject.CreatePrimitive(PrimitiveType.Quad);
-            Material coinMat = new Material(tempPrim.GetComponent<Renderer>().sharedMaterial);
-            Destroy(tempPrim);
+            // Gold material — use the same shader as other objects in the scene
+            Renderer rend = coin.GetComponent<Renderer>();
+            Material coinMat = rend.material; // Start with the default primitive material
+            coinMat.color = new Color(1f, 0.85f, 0.1f);
             if (coinMat.HasProperty("_BaseColor")) coinMat.SetColor("_BaseColor", new Color(1f, 0.85f, 0.1f));
             if (coinMat.HasProperty("_Color")) coinMat.SetColor("_Color", new Color(1f, 0.85f, 0.1f));
-            if (coinMat.HasProperty("_Smoothness")) coinMat.SetFloat("_Smoothness", 0.8f);
-            coin.GetComponent<Renderer>().material = coinMat;
+            if (coinMat.HasProperty("_Smoothness")) coinMat.SetFloat("_Smoothness", 0.9f);
+            if (coinMat.HasProperty("_Metallic")) coinMat.SetFloat("_Metallic", 0.8f);
             
             Collider col = coin.GetComponent<Collider>();
             if (col != null) Destroy(col);
             
-            // Store distance as tag data
-            coin.AddComponent<CoinData>().distanceAlongRoute = dist;
-            coin.AddComponent<CoinData>().collected = false;
+            CoinData coinData = coin.AddComponent<CoinData>();
+            coinData.distanceAlongRoute = coinDistances[i];
+            coinData.collected = false;
             
             activeCoinObjects.Add(coin);
         }
         
-        // Position coins along the spline
-        SplinePath spline = FindObjectOfType<SplinePath>();
-        Terrain terrain = FindObjectOfType<Terrain>();
-        
-        foreach (GameObject coin in activeCoinObjects)
-        {
-            CoinData data = coin.GetComponent<CoinData>();
-            if (spline != null && spline.GetTotalLength() > 0f)
-            {
-                SplinePath.SplineSample s = spline.SampleAtDistance(data.distanceAlongRoute);
-                Vector3 pos = s.position;
-                if (terrain != null) pos.y = terrain.SampleHeight(pos) + 2f;
-                coin.transform.position = pos;
-            }
-        }
+        // Position coins immediately using bike's current transform as reference
+        PositionCoinsAlongRoute();
         
         UpdateCoinCounter();
+        Debug.Log($"[HillExperiment] Spawned {count} coins (Reward group)");
     }
     
-    private void CheckCoinCollection(float currentHillDist)
+    /// <summary>
+    /// Position coins along the route using the same method the bike uses to move.
+    /// Called once at spawn and can be called again if needed.
+    /// </summary>
+    private void PositionCoinsAlongRoute()
     {
+        if (bikeController == null) return;
+        
+        SplinePath spline = FindObjectOfType<SplinePath>();
+        
         foreach (GameObject coin in activeCoinObjects)
         {
             if (coin == null) continue;
             CoinData data = coin.GetComponent<CoinData>();
             if (data == null || data.collected) continue;
             
-            if (currentHillDist >= data.distanceAlongRoute)
+            // Total distance from course start = flat approach + coin's hill distance
+            float totalDist = flatApproachLength + data.distanceAlongRoute;
+            
+            if (spline != null && spline.GetTotalLength() > 0f)
+            {
+                float clampedDist = Mathf.Clamp(totalDist, 0f, spline.GetTotalLength() - 1f);
+                SplinePath.SplineSample s = spline.SampleAtDistance(clampedDist);
+                Vector3 pos = s.position;
+                // Place coin at same height as the road + floating offset
+                Terrain terrain = FindObjectOfType<Terrain>();
+                if (terrain != null)
+                {
+                    float terrainY = terrain.SampleHeight(pos);
+                    pos.y = Mathf.Max(pos.y, terrainY) + 1.5f;
+                }
+                else
+                {
+                    pos.y += 1.5f;
+                }
+                coin.transform.position = pos;
+            }
+            else
+            {
+                // No spline — place coins ahead of bike start using forward direction
+                Vector3 bikeStart = bikeController.transform.position;
+                Vector3 forward = bikeController.transform.forward;
+                Vector3 pos = bikeStart + forward * totalDist;
+                pos.y += 1.5f;
+                coin.transform.position = pos;
+            }
+        }
+    }
+    
+    private void CheckCoinCollection(float currentHillDist)
+    {
+        if (bikeController == null) return;
+        Vector3 bikePos = bikeController.transform.position;
+        
+        foreach (GameObject coin in activeCoinObjects)
+        {
+            if (coin == null) continue;
+            CoinData data = coin.GetComponent<CoinData>();
+            if (data == null || data.collected) continue;
+            
+            // Use horizontal distance only (ignore height difference)
+            Vector3 coinPos = coin.transform.position;
+            float dx = bikePos.x - coinPos.x;
+            float dz = bikePos.z - coinPos.z;
+            float horizontalDist = Mathf.Sqrt(dx * dx + dz * dz);
+            
+            if (horizontalDist < 4f)
             {
                 data.collected = true;
                 coinsCollected++;
@@ -875,13 +989,10 @@ public class HillClimbExperiment : MonoBehaviour
                 coin.SetActive(false);
                 UpdateCoinCounter();
                 
+                Debug.Log($"[HillExperiment] 🪙 Coin collected! ({coinsCollected}/5)");
+                
                 if (EventMarkerSender.Instance != null)
                     EventMarkerSender.Instance.SendEvent("COIN_COLLECTED", $"coin={coinsCollected},total={totalCoinsCollected}");
-            }
-            else
-            {
-                // Rotate coin for visual effect
-                coin.transform.Rotate(0f, 90f * Time.deltaTime, 0f);
             }
         }
     }
@@ -890,9 +1001,7 @@ public class HillClimbExperiment : MonoBehaviour
     {
         if (coinCounterText != null)
         {
-            int condIdx = conditionOrder[currentConditionIndex];
-            HillCondition cond = conditions[condIdx];
-            coinCounterText.text = $"🪙 {coinsCollected} / {cond.coinReward}";
+            coinCounterText.text = $"🪙 {coinsCollected} / 5";
         }
     }
     
@@ -959,9 +1068,17 @@ public class HillClimbExperiment : MonoBehaviour
         if (EventMarkerSender.Instance != null)
             EventMarkerSender.Instance.SendEvent("BLOCK_END", $"block={blockNumber},completed={results.Count(r => r.completed)},coins={totalCoinsCollected}");
         
-        // Show trial starter UI for next block
-        TrialStarterUI starter = FindObjectOfType<TrialStarterUI>();
-        if (starter != null) starter.ShowStartPanel();
+        // Show start screen for next block
+        StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true); // include inactive
+        if (startScreen != null)
+        {
+            startScreen.gameObject.SetActive(true);
+        }
+        else
+        {
+            TrialStarterUI starter = FindObjectOfType<TrialStarterUI>();
+            if (starter != null) starter.ShowStartPanel();
+        }
     }
     
     // === GUI ===

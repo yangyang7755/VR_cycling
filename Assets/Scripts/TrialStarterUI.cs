@@ -69,15 +69,12 @@ public class TrialStarterUI : MonoBehaviour
         if (dateText != null)
             dateText.text = DateTime.Now.ToString("yyyy-MM-dd");
         
-        // Show panel if enabled — but defer to BluetoothConnectionUI if present
-        BluetoothConnectionUI btUI = FindObjectOfType<BluetoothConnectionUI>();
-        if (btUI != null)
+        // Show panel if enabled
+        if (showOnStart && startPanel != null)
         {
-            // BluetoothConnectionUI will call ShowStartPanel() after devices are confirmed
-            if (startPanel != null)
-                startPanel.SetActive(false);
+            ShowStartPanel();
         }
-        else if (showOnStart && startPanel != null)
+        else if (startPanel != null)
         {
             ShowStartPanel();
         }
@@ -105,6 +102,9 @@ public class TrialStarterUI : MonoBehaviour
         {
             startPanel.SetActive(true);
             
+            // Hide progress bars so they don't block the input fields
+            SetProgressBarsVisible(false);
+            
             // Focus on participant ID input
             if (participantIDInput != null)
             {
@@ -122,7 +122,28 @@ public class TrialStarterUI : MonoBehaviour
         if (startPanel != null)
         {
             startPanel.SetActive(false);
+            
+            // Restore progress bars
+            SetProgressBarsVisible(true);
         }
+    }
+
+    /// <summary>
+    /// Show or hide all progress bar UI elements
+    /// </summary>
+    private void SetProgressBarsVisible(bool visible)
+    {
+        var elevationBar = FindObjectOfType<ElevationProgressBar>();
+        if (elevationBar != null) elevationBar.gameObject.SetActive(visible);
+
+        var elevationProfile = FindObjectOfType<ElevationProfileBar>();
+        if (elevationProfile != null) elevationProfile.gameObject.SetActive(visible);
+
+        var distanceBar = FindObjectOfType<DistanceProgressBar>();
+        if (distanceBar != null) distanceBar.gameObject.SetActive(visible);
+
+        var continuousProgress = FindObjectOfType<ContinuousProgressUI>();
+        if (continuousProgress != null) continuousProgress.gameObject.SetActive(visible);
     }
 
     /// <summary>
@@ -150,23 +171,23 @@ public class TrialStarterUI : MonoBehaviour
             dataLogger.SetTrialInfo(participantID, trialNumber);
         }
 
-        // Always use ExperimentController (the main experiment system)
-        ExperimentController expController = FindObjectOfType<ExperimentController>();
-        if (expController != null)
+        // Use HillClimbExperiment as the primary experiment system
+        HillClimbExperiment hillExp = FindObjectOfType<HillClimbExperiment>();
+        if (hillExp != null)
         {
-            expController.SetParticipantID(participantID);
-            expController.SetBlockNumber(trialNumber);
-            expController.StartExperiment();
-            Debug.Log($"[TrialStarter] Started ExperimentController: {participantID}, Block {trialNumber}");
+            Debug.Log($"[TrialStarter] Starting HillClimbExperiment: {participantID}, Block {trialNumber}");
+            hillExp.StartBlock(participantID, trialNumber, selectedGroup);
         }
         else
         {
-            // Fallback to HillClimbExperiment if no ExperimentController
-            HillClimbExperiment hillExp = FindObjectOfType<HillClimbExperiment>();
-            if (hillExp != null)
+            // Fallback to ExperimentController
+            ExperimentController expController = FindObjectOfType<ExperimentController>();
+            if (expController != null)
             {
-                Debug.Log($"\n[HillExperiment] Starting Block {trialNumber} for {participantID} (Group: {selectedGroup})");
-                hillExp.StartBlock(participantID, trialNumber, selectedGroup);
+                expController.SetParticipantID(participantID);
+                expController.SetBlockNumber(trialNumber);
+                expController.StartExperiment();
+                Debug.Log($"[TrialStarter] Started ExperimentController: {participantID}, Block {trialNumber}");
             }
             else
             {

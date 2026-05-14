@@ -276,18 +276,11 @@ public class BikeController : MonoBehaviour
 
         lastUpdateTime = Time.time;
 
-        // Disable simulation mode when WebSocket client is available (real bike data)
-        if (simulationMode)
-        {
-            simulationMode = false;
-            Debug.Log("[BikeController] Simulation mode DISABLED — power must come from real bike");
-        }
-
-        // Reset power to 0 — must come from real bike, not serialized scene value
+        // Simulation mode: force OFF for real bike usage
+        // To test without bike, manually check "Simulation Mode" in Inspector
+        simulationMode = false;
         currentPower = 0f;
         simulatedPower = 0f;
-
-        // Ensure resistance control is enabled for real bike
         enableResistanceControl = true;
 
         Debug.Log($"[BikeController] Initialized in {speedMode} mode");
@@ -386,16 +379,12 @@ public class BikeController : MonoBehaviour
         {
             simulatedPower = Mathf.Max(simulatedPower - powerStep * Time.deltaTime * 10f, minSimulatedPower);
         }
-        // Coast - gradual power decrease
+        // Space = stop pedaling (power to 0)
         else if (Input.GetKey(KeyCode.Space))
         {
             simulatedPower = Mathf.Max(simulatedPower - powerStep * Time.deltaTime * 5f, 0f);
         }
-        // Natural power decay when no input (simulates stopping pedaling)
-        else
-        {
-            simulatedPower = Mathf.Max(simulatedPower - powerStep * Time.deltaTime * 2f, 0f);
-        }
+        // No input = maintain current power (constant pedaling)
 
         // Update current power with simulated value
         currentPower = simulatedPower;
@@ -897,6 +886,11 @@ public class BikeController : MonoBehaviour
     public float GetDistance()
     {
         return distanceTravelled;
+    }
+
+    public bool IsSimulationMode()
+    {
+        return simulationMode;
     }
 
     public float GetCurrentPower()

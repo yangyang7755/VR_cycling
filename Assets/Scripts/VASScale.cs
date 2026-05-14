@@ -52,6 +52,10 @@ public class VASScale : MonoBehaviour
         public string leftAnchor = "No Pain";
         public string rightAnchor = "Worst Pain Imaginable";
         public Color accentColor = new Color(1f, 0.3f, 0.3f);
+        [Tooltip("Use 1-10 discrete scale instead of 0-100 continuous")]
+        public bool useDiscreteScale = false;
+        [Tooltip("Color at high end of scale (for gradient effect)")]
+        public Color highColor = new Color(0.6f, 0.2f, 0.9f); // Purple
     }
     
     [System.Serializable]
@@ -128,6 +132,11 @@ public class VASScale : MonoBehaviour
     
     private void HandleInput()
     {
+        VASConfig config = scales[(currentScaleIndex - 1 + scales.Count) % scales.Count];
+        bool discrete = config.useDiscreteScale;
+        float maxVal = discrete ? 10f : 100f;
+        float minVal = discrete ? 1f : 0f;
+
         if (Input.GetMouseButton(0))
         {
             // Check if clicking on the scale
@@ -135,7 +144,9 @@ public class VASScale : MonoBehaviour
             if (RectTransformUtility.ScreenPointToLocalPointInRectangle(scaleRect, Input.mousePosition, null, out localPoint))
             {
                 float normalized = Mathf.Clamp01((localPoint.x + scaleWidth * 0.5f) / scaleWidth);
-                currentValue = normalized * 100f;
+                currentValue = discrete 
+                    ? Mathf.Round(normalized * 9f + 1f) // 1-10
+                    : normalized * 100f;
                 UpdateMarkerPosition();
                 isDragging = true;
             }
@@ -152,13 +163,25 @@ public class VASScale : MonoBehaviour
             RecordResponse();
         }
         
-        // Arrow keys for fine adjustment
-        if (Input.GetKey(KeyCode.LeftArrow))
-            currentValue = Mathf.Max(0f, currentValue - 30f * Time.deltaTime);
-        if (Input.GetKey(KeyCode.RightArrow))
-            currentValue = Mathf.Min(100f, currentValue + 30f * Time.deltaTime);
+        // Arrow keys
+        if (discrete)
+        {
+            // Discrete: step by 1
+            if (Input.GetKeyDown(KeyCode.LeftArrow))
+                currentValue = Mathf.Max(minVal, currentValue - 1f);
+            if (Input.GetKeyDown(KeyCode.RightArrow))
+                currentValue = Mathf.Min(maxVal, currentValue + 1f);
+        }
+        else
+        {
+            // Continuous: smooth movement
+            if (Input.GetKey(KeyCode.LeftArrow))
+                currentValue = Mathf.Max(minVal, currentValue - 30f * Time.deltaTime);
+            if (Input.GetKey(KeyCode.RightArrow))
+                currentValue = Mathf.Min(maxVal, currentValue + 30f * Time.deltaTime);
+        }
         
-        if (Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.RightArrow))
+        if (Input.GetKey(KeyCode.LeftArrow) || Input.GetKey(KeyCode.RightArrow) || Input.GetKeyDown(KeyCode.LeftArrow) || Input.GetKeyDown(KeyCode.RightArrow))
             UpdateMarkerPosition();
     }
     
@@ -172,18 +195,22 @@ public class VASScale : MonoBehaviour
     private void ShowVAS(VASConfig config)
     {
         isShowing = true;
-        currentValue = 50f;
+        currentValue = config.useDiscreteScale ? 5f : 50f; // Start at middle
         promptShowTime = Time.time;
         
         vasPanel.SetActive(true);
         
-        questionText.text = $"Rate your current {config.scaleName}:";
+        questionText.text = config.useDiscreteScale 
+            ? $"How much {config.scaleName.ToLower()} did you feel in this trial?"
+            : $"Rate your current {config.scaleName}:";
         leftLabel.text = config.leftAnchor;
         rightLabel.text = config.rightAnchor;
         marker.color = config.accentColor;
         
         UpdateMarkerPosition();
-        valueText.text = "Click on the line or use ← → arrows, then press Enter";
+        valueText.text = config.useDiscreteScale 
+            ? "Use ← → arrows to select (1-10), then press Enter"
+            : "Click on the line or use ← → arrows, then press Enter";
         
         // Send event marker
         if (EventMarkerSender.Instance != null)
@@ -201,12 +228,15 @@ public class VASScale : MonoBehaviour
         VASConfig config = scales[(currentScaleIndex - 1 + scales.Count) % scales.Count];
         float responseTime = Time.time - promptShowTime;
         
+        // For discrete scale, store as integer 1-10; for continuous, store 0-100
+        float storedValue = config.useDiscreteScale ? Mathf.RoundToInt(currentValue) : currentValue;
+        
         VASResponse response = new VASResponse
         {
             timestamp = Time.time,
             distance = bikeController != null ? bikeController.GetDistance() : 0f,
             scaleName = config.scaleName,
-            value = currentValue,
+            value = storedValue,
             responseTime = responseTime
         };
         
@@ -216,11 +246,12 @@ public class VASScale : MonoBehaviour
         // Send event marker
         if (EventMarkerSender.Instance != null)
             EventMarkerSender.Instance.SendEvent($"{config.scaleName.ToUpper()}_VAS_RESPONSE", 
-                $"value={currentValue:F1},rt={responseTime:F2}");
+                $"value={storedValue:F1},rt={responseTime:F2}");
         
+        string scaleLabel = config.useDiscreteScale ? "/10" : "/100";
         if (logToConsole)
         {
-            Debug.Log($"[VAS] {config.scaleName}: {currentValue:F1}/100 (RT: {responseTime:F1}s, Dist: {response.distance:F0}m)");
+            Debug.Log($"[VAS] {config.scaleName}: {storedValue:F0}{scaleLabel} (RT: {responseTime:F1}s, Dist: {response.distance:F0}m)");
         }
         
         HideVAS();
@@ -233,9 +264,28 @@ public class VASScale : MonoBehaviour
     private void UpdateMarkerPosition()
     {
         if (marker == null) return;
-        float x = (currentValue / 100f - 0.5f) * scaleWidth;
+        
+        VASConfig config = scales[(currentScaleIndex - 1 + scales.Count) % scales.Count];
+        bool discrete = config.useDiscreteScale;
+        
+        float normalized;
+        if (discrete)
+        {
+            // 1-10 maps to 0-1
+            normalized = (currentValue - 1f) / 9f;
+            valueText.text = $"{Mathf.RoundToInt(currentValue)}";
+            
+            // Purple gradient: low = accent color, high = purple
+            marker.color = Color.Lerp(config.accentColor, config.highColor, normalized);
+        }
+        else
+        {
+            normalized = currentValue / 100f;
+            valueText.text = $"{currentValue:F0}";
+        }
+        
+        float x = (normalized - 0.5f) * scaleWidth;
         marker.rectTransform.anchoredPosition = new Vector2(x, 0f);
-        valueText.text = $"{currentValue:F0}";
     }
 
     private void CreateUI()
