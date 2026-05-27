@@ -52,7 +52,7 @@ public class HillClimbExperiment : MonoBehaviour
     private int currentConditionIndex = 0;
     
     // State machine
-    private enum Phase { Idle, FlatApproach, HillCue, HillClimb, Quitting, Completed, Abandoned, RewardRating, BlockEnd }
+    private enum Phase { Idle, HillCue, Countdown, HillClimb, Quitting, Completed, Abandoned, RewardQuestion, RewardRating, BlockEnd }
     private Phase currentPhase = Phase.Idle;
     
     private float phaseStartTime;
@@ -69,6 +69,7 @@ public class HillClimbExperiment : MonoBehaviour
     private TextMeshProUGUI completionText;
     private TextMeshProUGUI coinCounterText;
     private Canvas uiCanvas;
+    private GameObject cueBgPanel; // Full-screen black overlay for EEG-clean cue display
     
     // Coin objects
     private List<GameObject> activeCoinObjects = new List<GameObject>();
@@ -382,7 +383,7 @@ public class HillClimbExperiment : MonoBehaviour
         phaseStartTime = Time.time;
         phaseStartDistance = bikeController != null ? bikeController.GetDistance() : 0f;
 
-        SetPhase(Phase.FlatApproach);
+        SetPhase(Phase.HillCue);
 
         if (EventMarkerSender.Instance != null)
             EventMarkerSender.Instance.SendEvent("CONDITION_START", $"condition={cond.name},gradient={cond.averageGradient},rolling={cond.isRolling}");
@@ -401,12 +402,18 @@ public class HillClimbExperiment : MonoBehaviour
         
         switch (newPhase)
         {
-            case Phase.FlatApproach:
-                // Pain VAS stays visible throughout
-                break;
-                
             case Phase.HillCue:
                 ShowHillCue();
+                // Lock bike during cue — participant sits still for EEG
+                if (bikeController != null) bikeController.SetMaxCourseDistance(0f);
+                break;
+            
+            case Phase.Countdown:
+                // Show countdown on cue panel (no black bg)
+                cuePanel.SetActive(true);
+                cueText.text = "3";
+                if (EventMarkerSender.Instance != null)
+                    EventMarkerSender.Instance.SendEvent("COUNTDOWN_START");
                 break;
                 
             case Phase.HillClimb:
@@ -419,6 +426,10 @@ public class HillClimbExperiment : MonoBehaviour
                 
             case Phase.Abandoned:
                 ShowCompletion(false);
+                break;
+            
+            case Phase.RewardQuestion:
+                ShowRewardQuestion();
                 break;
                 
             case Phase.RewardRating:
@@ -438,15 +449,33 @@ public class HillClimbExperiment : MonoBehaviour
         
         switch (currentPhase)
         {
-            case Phase.FlatApproach:
-                if (dist - phaseStartDistance >= flatApproachLength)
-                    SetPhase(Phase.HillCue);
-                break;
-                
             case Phase.HillCue:
-                // Auto-transition to hill climb after brief notification (no keypress needed)
-                if (Time.time - phaseStartTime > 2f)
+                // Show difficulty cue for 10 seconds (EEG time-locked window)
+                // Bike is locked — participant sits still
+                if (Time.time - phaseStartTime > 10f)
+                {
+                    if (cueBgPanel != null) cueBgPanel.SetActive(false);
+                    cuePanel.SetActive(false);
+                    SetPhase(Phase.Countdown);
+                }
+                break;
+            
+            case Phase.Countdown:
+                // 3-2-1-GO countdown before cycling starts
+                float countdownElapsed = Time.time - phaseStartTime;
+                if (countdownElapsed < 1f)
+                    cueText.text = "3";
+                else if (countdownElapsed < 2f)
+                    cueText.text = "2";
+                else if (countdownElapsed < 3f)
+                    cueText.text = "1";
+                else if (countdownElapsed < 4f)
+                    cueText.text = "GO!";
+                else
+                {
+                    cuePanel.SetActive(false);
                     SetPhase(Phase.HillClimb);
+                }
                 break;
                 
             case Phase.HillClimb:
@@ -455,8 +484,14 @@ public class HillClimbExperiment : MonoBehaviour
                 
             case Phase.Completed:
             case Phase.Abandoned:
-                // Wait 2 seconds then show reward rating
+                // Wait 2 seconds then show reward question
                 if (Time.time - phaseStartTime > 2f)
+                    SetPhase(Phase.RewardQuestion);
+                break;
+            
+            case Phase.RewardQuestion:
+                // Show "How rewarding was this trial?" for 5 seconds (EEG deliberation window)
+                if (Time.time - phaseStartTime > 5f)
                     SetPhase(Phase.RewardRating);
                 break;
                 
@@ -464,7 +499,6 @@ public class HillClimbExperiment : MonoBehaviour
                 // Wait for reward VAS to be dismissed
                 if (rewardVAS != null)
                 {
-                    // Give VAS at least 1 second to appear before checking if dismissed
                     if (Time.time - phaseStartTime > 1f && !rewardVAS.IsShowing())
                     {
                         FinishCondition();
@@ -472,7 +506,6 @@ public class HillClimbExperiment : MonoBehaviour
                 }
                 else
                 {
-                    // No VAS assigned — auto-proceed after 3 seconds
                     if (Time.time - phaseStartTime > 3f)
                     {
                         FinishCondition();
@@ -482,7 +515,7 @@ public class HillClimbExperiment : MonoBehaviour
         }
         
         // Log data continuously during hill climb
-        if (currentPhase == Phase.HillClimb || currentPhase == Phase.FlatApproach)
+        if (currentPhase == Phase.HillClimb)
         {
             LogDataPoint("");
         }
@@ -511,21 +544,54 @@ public class HillClimbExperiment : MonoBehaviour
 
         float elevGain = (cond.averageGradient / 100f) * cond.hillLengthMeters;
 
-        string cueMsg = $"⛰ CLIMB AHEAD\n\n" +
-                        $"Gradient: {cond.averageGradient}%\n" +
-                        $"({(cond.isRolling ? "Rolling" : "Steady")})";
+        // Create full-screen black overlay for clean EEG recording
+        if (cueBgPanel == null)
+        {
+            // Use the same parent as cuePanel to ensure correct canvas
+            Transform parent = cuePanel.transform.parent;
+            cueBgPanel = new GameObject("CueBgPanel");
+            cueBgPanel.transform.SetParent(parent, false);
+            RectTransform bgrt = cueBgPanel.AddComponent<RectTransform>();
+            bgrt.anchorMin = Vector2.zero;
+            bgrt.anchorMax = Vector2.one;
+            bgrt.offsetMin = Vector2.zero;
+            bgrt.offsetMax = Vector2.zero;
+            Image bgImg = cueBgPanel.AddComponent<Image>();
+            bgImg.color = Color.black;
+        }
+        cueBgPanel.SetActive(true);
+        cueBgPanel.transform.SetAsLastSibling();
+
+        // Make cue panel full-screen for this phase
+        RectTransform cueRect = cuePanel.GetComponent<RectTransform>();
+        cueRect.anchorMin = new Vector2(0.1f, 0.1f);
+        cueRect.anchorMax = new Vector2(0.9f, 0.9f);
+        cueRect.offsetMin = Vector2.zero;
+        cueRect.offsetMax = Vector2.zero;
+        cuePanel.GetComponent<Image>().color = Color.clear; // Transparent bg (black is behind)
+
+        string cueMsg = $"CONDITION {currentConditionIndex + 1} / {conditionOrder.Count}\n\n" +
+                        $"⛰ Gradient: {cond.averageGradient}%\n" +
+                        $"Profile: {(cond.isRolling ? "Rolling" : "Steady")}\n" +
+                        $"Distance: {cond.hillLengthMeters:F0}m\n" +
+                        $"Elevation: +{elevGain:F0}m";
 
         if (group == ExperimentGroup.Reward)
             cueMsg += $"\n\nCoins: 5 🪙";
 
         cueText.text = cueMsg;
+        cueText.fontSize = 32;
         cuePanel.SetActive(true);
+        cuePanel.transform.SetAsLastSibling();
 
-        // Spawn a physical "CLIMB BEGINS" sign at the 50m mark
-        SpawnClimbSign(cond);
-
+        // === EEG MARKER: CUE_ONSET ===
         if (EventMarkerSender.Instance != null)
-            EventMarkerSender.Instance.SendEvent("HILL_CUE", $"gradient={cond.averageGradient},elevation_gain={elevGain:F0},rolling={cond.isRolling}");
+            EventMarkerSender.Instance.SendEvent("CUE_ONSET", 
+                $"condition={currentConditionIndex + 1},gradient={cond.averageGradient},rolling={cond.isRolling},name={cond.name}");
+        Debug.Log($"[EEG] CUE_ONSET — Condition {currentConditionIndex + 1}: {cond.name} ({cond.averageGradient}%)");
+
+        // Spawn roadside sign
+        SpawnClimbSign(cond);
     }
 
     private GameObject climbSign;
@@ -727,28 +793,39 @@ public class HillClimbExperiment : MonoBehaviour
     {
         float hillDist = dist - phaseStartDistance;
         
-        // Quit detection: 5s no pedaling triggers a 5s countdown, then abandon
+        // Quit detection: 5s no pedaling triggers a 10s countdown, then abandon
         if (!simulationModeActive && speed < quitSpeedThreshold)
         {
             noSpeedTimer += Time.deltaTime;
             
-            // After 5s of no pedaling, show countdown
+            // After 5s of no pedaling, show 10s countdown
             if (noSpeedTimer >= 5f)
             {
-                float countdownRemaining = quitTimeThreshold - noSpeedTimer;
-                if (countdownRemaining > 0f)
+                float countdownRemaining = 15f - noSpeedTimer; // 5s grace + 10s countdown = 15s total
+                
+                // Send EEG marker at the start of the countdown (once)
+                if (noSpeedTimer >= 5f && noSpeedTimer - Time.deltaTime < 5f)
                 {
-                    // Show countdown on cue panel
-                    cuePanel.SetActive(true);
-                    cueText.text = $"⚠ Resume pedaling!\n\nHill abandoned in: {Mathf.CeilToInt(countdownRemaining)}s";
+                    if (EventMarkerSender.Instance != null)
+                        EventMarkerSender.Instance.SendEvent("DISENGAGE_ONSET", 
+                            $"condition={currentConditionIndex + 1}");
+                    Debug.Log("[EEG] DISENGAGE_ONSET — 10s countdown started");
                 }
                 
-                if (noSpeedTimer >= quitTimeThreshold)
+                if (countdownRemaining > 0f)
+                {
+                    cuePanel.SetActive(true);
+                    cueText.text = $"⚠ Resume pedaling!\n\nTrial ends in: {Mathf.CeilToInt(countdownRemaining)}s";
+                }
+                
+                if (noSpeedTimer >= 15f) // 5s grace + 10s countdown
                 {
                     cuePanel.SetActive(false);
-                    Debug.Log($"[HillExperiment] QUIT — no pedaling for {quitTimeThreshold}s");
+                    Debug.Log($"[HillExperiment] QUIT — no pedaling for 15s");
                     if (EventMarkerSender.Instance != null)
-                        EventMarkerSender.Instance.SendEvent("QUIT_DETECTED", $"no_speed_duration={noSpeedTimer:F1}");
+                        EventMarkerSender.Instance.SendEvent("DISENGAGE_QUIT", 
+                            $"condition={currentConditionIndex + 1},no_speed_duration={noSpeedTimer:F1}");
+                    Debug.Log("[EEG] DISENGAGE_QUIT");
                     SetPhase(Phase.Abandoned);
                     return;
                 }
@@ -760,6 +837,10 @@ public class HillClimbExperiment : MonoBehaviour
             if (noSpeedTimer >= 5f)
             {
                 cuePanel.SetActive(false);
+                if (EventMarkerSender.Instance != null)
+                    EventMarkerSender.Instance.SendEvent("DISENGAGE_RESUME", 
+                        $"condition={currentConditionIndex + 1}");
+                Debug.Log("[EEG] DISENGAGE_RESUME — participant resumed pedaling");
             }
             noSpeedTimer = 0f;
         }
@@ -805,9 +886,51 @@ public class HillClimbExperiment : MonoBehaviour
         completionPanel.SetActive(true);
     }
     
-    private void ShowRewardRating()
+    private void ShowRewardQuestion()
     {
         completionPanel.SetActive(false);
+        
+        // Show black background with question text (EEG deliberation window)
+        if (cueBgPanel == null)
+        {
+            Canvas canvas = FindObjectOfType<Canvas>();
+            cueBgPanel = new GameObject("CueBgPanel");
+            cueBgPanel.transform.SetParent(canvas != null ? canvas.transform : cuePanel.transform.parent, false);
+            RectTransform bgrt = cueBgPanel.AddComponent<RectTransform>();
+            bgrt.anchorMin = Vector2.zero;
+            bgrt.anchorMax = Vector2.one;
+            bgrt.offsetMin = Vector2.zero;
+            bgrt.offsetMax = Vector2.zero;
+            Image bgImg = cueBgPanel.AddComponent<Image>();
+            bgImg.color = new Color(0f, 0f, 0f, 0.95f);
+        }
+        cueBgPanel.SetActive(true);
+        cueBgPanel.transform.SetAsLastSibling();
+        
+        cueText.text = "How rewarding was this trial?\n\n(Think about your answer...)";
+        cuePanel.SetActive(true);
+        cuePanel.transform.SetAsLastSibling();
+        
+        // === EEG MARKER: REWARD_QUESTION_ONSET ===
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("REWARD_QUESTION_ONSET", 
+                $"condition={currentConditionIndex + 1}");
+        Debug.Log("[EEG] REWARD_QUESTION_ONSET — 5s deliberation window");
+    }
+    
+    private void ShowRewardRating()
+    {
+        // Hide question overlay, show rating slider
+        if (cueBgPanel != null) cueBgPanel.SetActive(false);
+        cuePanel.SetActive(false);
+        completionPanel.SetActive(false);
+        
+        // === EEG MARKER: REWARD_SLIDER_ONSET ===
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("REWARD_SLIDER_ONSET", 
+                $"condition={currentConditionIndex + 1}");
+        Debug.Log("[EEG] REWARD_SLIDER_ONSET — rating scale active");
+        
         if (rewardVAS != null)
             rewardVAS.TriggerVASNow("Reward");
     }

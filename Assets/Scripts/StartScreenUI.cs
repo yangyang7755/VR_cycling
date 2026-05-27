@@ -51,8 +51,17 @@ public class StartScreenUI : MonoBehaviour
     [Tooltip("HillTrialManager to apply trial configuration based on trial number")]
     [SerializeField] private HillTrialManager hillTrialManager;
 
+    [Header("EEG Baseline")]
+    [Tooltip("Duration of baseline recording in seconds (300 = 5 minutes)")]
+    [SerializeField] private float baselineDurationSeconds = 300f;
+    
+    [Tooltip("Skip baseline (for testing)")]
+    [SerializeField] private bool skipBaseline = false;
+
     private ParticipantData currentData;
     private int lastTrialNumber = 1;
+    private GameObject baselinePanel;
+    private TextMeshProUGUI baselineText;
 
     public static ParticipantData CurrentParticipantData { get; private set; }
 
@@ -267,28 +276,8 @@ public class StartScreenUI : MonoBehaviour
         // Hide start screen
         HideStartScreen();
 
-        // Start the HillClimbExperiment with participant data
-        HillClimbExperiment hillExp = FindObjectOfType<HillClimbExperiment>();
-        if (hillExp != null)
-        {
-            hillExp.StartBlock(currentData.participantID, currentData.trialNumber, HillClimbExperiment.ExperimentGroup.Control);
-            Debug.Log($"[StartScreenUI] Started HillClimbExperiment: {currentData.participantID}, Block {currentData.trialNumber}");
-        }
-        else
-        {
-            // Fallback to ExperimentController
-            ExperimentController expController = FindObjectOfType<ExperimentController>();
-            if (expController != null)
-            {
-                expController.SetParticipantID(currentData.participantID);
-                expController.SetBlockNumber(currentData.trialNumber);
-                expController.StartExperiment();
-                Debug.Log($"[StartScreenUI] Started ExperimentController: {currentData.participantID}, Block {currentData.trialNumber}");
-            }
-        }
-
-        // Optional: Trigger event for other scripts
-        OnTrialStarted?.Invoke(currentData);
+        // Run baseline then start experiment
+        StartCoroutine(BaselineThenExperiment());
     }
 
     private bool ValidateInput()
@@ -386,5 +375,111 @@ public class StartScreenUI : MonoBehaviour
     public void ShowStartScreenManual()
     {
         ShowStartScreen();
+    }
+
+    // =========================================================================
+    // BASELINE EEG RECORDING PHASE
+    // =========================================================================
+
+    private System.Collections.IEnumerator BaselineThenExperiment()
+    {
+        if (!skipBaseline)
+        {
+            // Create baseline overlay (black screen with text)
+            CreateBaselinePanel();
+            baselinePanel.SetActive(true);
+
+            // Send EEG marker: BASELINE_START
+            if (EventMarkerSender.Instance != null)
+                EventMarkerSender.Instance.SendEvent("BASELINE_START", $"participant={currentData.participantID},duration={baselineDurationSeconds}");
+            Debug.Log($"[EEG] BASELINE_START — {baselineDurationSeconds}s");
+
+            // Countdown
+            float elapsed = 0f;
+            while (elapsed < baselineDurationSeconds)
+            {
+                float remaining = baselineDurationSeconds - elapsed;
+                int minutes = Mathf.FloorToInt(remaining / 60f);
+                int seconds = Mathf.FloorToInt(remaining % 60f);
+                baselineText.text = $"Baseline Recording\n\nPlease sit still and relax\n\n{minutes:D2}:{seconds:D2}";
+                elapsed += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
+            // Send EEG marker: BASELINE_END
+            if (EventMarkerSender.Instance != null)
+                EventMarkerSender.Instance.SendEvent("BASELINE_END", $"duration={baselineDurationSeconds}");
+            Debug.Log("[EEG] BASELINE_END");
+
+            // Remove baseline panel
+            if (baselinePanel != null)
+            {
+                Destroy(baselinePanel);
+                baselinePanel = null;
+            }
+        }
+
+        // Now start the experiment
+        HillClimbExperiment hillExp = FindObjectOfType<HillClimbExperiment>();
+        if (hillExp != null)
+        {
+            hillExp.StartBlock(currentData.participantID, currentData.trialNumber, HillClimbExperiment.ExperimentGroup.Control);
+            Debug.Log($"[StartScreenUI] Started HillClimbExperiment: {currentData.participantID}, Block {currentData.trialNumber}");
+        }
+        else
+        {
+            ExperimentController expController = FindObjectOfType<ExperimentController>();
+            if (expController != null)
+            {
+                expController.SetParticipantID(currentData.participantID);
+                expController.SetBlockNumber(currentData.trialNumber);
+                expController.StartExperiment();
+                Debug.Log($"[StartScreenUI] Started ExperimentController: {currentData.participantID}, Block {currentData.trialNumber}");
+            }
+        }
+
+        // Trigger event
+        OnTrialStarted?.Invoke(currentData);
+    }
+
+    private void CreateBaselinePanel()
+    {
+        // Full-screen black panel
+        Canvas canvas = FindObjectOfType<Canvas>();
+        if (canvas == null)
+        {
+            GameObject canvasObj = new GameObject("BaselineCanvas");
+            canvas = canvasObj.AddComponent<Canvas>();
+            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            canvas.sortingOrder = 999;
+            canvasObj.AddComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            canvasObj.AddComponent<GraphicRaycaster>();
+        }
+
+        baselinePanel = new GameObject("BaselinePanel");
+        baselinePanel.transform.SetParent(canvas.transform, false);
+        RectTransform rt = baselinePanel.AddComponent<RectTransform>();
+        rt.anchorMin = Vector2.zero;
+        rt.anchorMax = Vector2.one;
+        rt.offsetMin = Vector2.zero;
+        rt.offsetMax = Vector2.zero;
+
+        // Black background
+        Image bg = baselinePanel.AddComponent<Image>();
+        bg.color = Color.black;
+
+        // Text
+        GameObject textObj = new GameObject("BaselineText");
+        textObj.transform.SetParent(baselinePanel.transform, false);
+        baselineText = textObj.AddComponent<TextMeshProUGUI>();
+        baselineText.text = "Baseline Recording\n\nPlease sit still and relax\n\n05:00";
+        baselineText.fontSize = 36;
+        baselineText.color = Color.white;
+        baselineText.alignment = TextAlignmentOptions.Center;
+        RectTransform trt = textObj.GetComponent<RectTransform>();
+        trt.anchorMin = Vector2.zero;
+        trt.anchorMax = Vector2.one;
+        trt.offsetMin = Vector2.zero;
+        trt.offsetMax = Vector2.zero;
     }
 }
