@@ -64,13 +64,16 @@ async def _ws_handler(ws):
                                 if _resistance_queue is not None:
                                     try:
                                         _resistance_queue.put_nowait(resistance_value)
+                                        print(f"[WebSocket] Resistance command queued: {resistance_value}")
                                     except queue.Full:
-                                        # If queue is full, remove oldest and add new value
                                         try:
                                             _resistance_queue.get_nowait()
                                             _resistance_queue.put_nowait(resistance_value)
+                                            print(f"[WebSocket] Resistance command queued (replaced): {resistance_value}")
                                         except queue.Empty:
                                             pass
+                                else:
+                                    print(f"[WebSocket] WARNING: Resistance queue is None! Command {resistance_value} dropped.")
                             
                             # Send confirmation message back to Unity
                             response = {

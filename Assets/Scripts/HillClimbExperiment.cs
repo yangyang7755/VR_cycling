@@ -58,6 +58,9 @@ public class HillClimbExperiment : MonoBehaviour
     private float phaseStartTime;
     private float phaseStartDistance;
     private float noSpeedTimer = 0f; // tracks how long speed has been zero
+    private bool rewardRatingConfirmed = false;
+    private float rewardConfirmTime = 0f;
+    private int rewardResponseCountAtStart = 0;
     private int coinsCollected = 0;
     private int totalCoinsCollected = 0;
     private bool experimentRunning = false;
@@ -188,6 +191,37 @@ public class HillClimbExperiment : MonoBehaviour
 
         Debug.Log($"[HillExperiment] Ready. {conditions.Count} conditions. Hill={hillLength}m, Flat={flatApproachLength}m");
         Debug.Log($"[HillExperiment] Conditions: {string.Join(", ", conditions.Select(c => c.name))}");
+        
+        // Ensure HUD elements are visible from the start (speed, power, cadence, etc.)
+        // These get hidden by some scripts during setup; force them on.
+        EnableHUDElements();
+    }
+    
+    /// <summary>
+    /// Enable all cycling HUD elements (speed, power, cadence, distance displays).
+    /// Called at startup and when entering HillClimb phase.
+    /// </summary>
+    private void EnableHUDElements()
+    {
+        foreach (var obj in FindObjectsOfType<MonoBehaviour>(true))
+        {
+            string typeName = obj.GetType().Name;
+            if (typeName == "ModernCyclingUI" || typeName == "BikeDataUI" || 
+                typeName == "CyclingHUD" || typeName == "BikeDataDisplay" ||
+                typeName == "EnhancedBikeDataUI" || typeName == "SimpleDataDisplay" ||
+                typeName == "ContinuousProgressUI" || typeName == "GradientIndicator")
+            {
+                obj.gameObject.SetActive(true);
+            }
+        }
+        foreach (var canvas in FindObjectsOfType<Canvas>(true))
+        {
+            string name = canvas.gameObject.name.ToLower();
+            if (name.Contains("hud") || name.Contains("cycling") || name.Contains("bike") || name.Contains("data"))
+            {
+                canvas.gameObject.SetActive(true);
+            }
+        }
     }
     
     private void CreateConditions()
@@ -218,8 +252,12 @@ public class HillClimbExperiment : MonoBehaviour
         for (int i = 0; i < conditions.Count; i++)
             conditionOrder.Add(i);
         
-        // Shuffle using participant ID + block as seed
-        int seed = (participantID + blockNumber.ToString()).GetHashCode();
+        // Shuffle using block number as primary seed (different block = different order)
+        // participantID ensures different participants get different orders too
+        int seed = 0;
+        foreach (char c in participantID) seed = seed * 31 + c;
+        seed = seed * 1000 + blockNumber; // Block number strongly changes the seed
+        
         System.Random rng = new System.Random(seed);
         for (int i = conditionOrder.Count - 1; i > 0; i--)
         {
@@ -228,6 +266,9 @@ public class HillClimbExperiment : MonoBehaviour
             conditionOrder[i] = conditionOrder[j];
             conditionOrder[j] = tmp;
         }
+        
+        Debug.Log($"[HillExperiment] Seed: {seed} (PID={participantID}, Block={blockNumber})");
+        Debug.Log($"[HillExperiment] Order: {string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
         
         Debug.Log($"[Experiment] Order: {string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
     }
@@ -298,6 +339,9 @@ public class HillClimbExperiment : MonoBehaviour
     
     public void StartBlock(string pid, int block, ExperimentGroup grp)
     {
+        // CRITICAL: Ensure game time is running (StartScreenUI may have paused it)
+        Time.timeScale = 1f;
+        
         participantID = pid;
         blockNumber = block;
         
@@ -337,6 +381,8 @@ public class HillClimbExperiment : MonoBehaviour
     
     private void StartNextCondition()
     {
+        finishingCondition = false; // Reset guard for next condition
+        
         if (currentConditionIndex >= conditionOrder.Count)
         {
             EndBlock();
@@ -378,6 +424,11 @@ public class HillClimbExperiment : MonoBehaviour
         if (bikeController != null)
             bikeController.ResetCourse();
 
+        // Force progress bar to resample with the new elevation profile
+        ElevationProgressBar progressBar = FindObjectOfType<ElevationProgressBar>();
+        if (progressBar != null)
+            progressBar.ResetProgress();
+
         coinsCollected = 0;
         noSpeedTimer = 0f;
         phaseStartTime = Time.time;
@@ -400,15 +451,21 @@ public class HillClimbExperiment : MonoBehaviour
         cuePanel.SetActive(false);
         completionPanel.SetActive(false);
         
+        // Hide progress bar during non-climb phases
+        ElevationProfileBar profileBar = FindObjectOfType<ElevationProfileBar>(true);
+        
         switch (newPhase)
         {
             case Phase.HillCue:
+                if (profileBar != null) profileBar.Hide();
                 ShowHillCue();
                 // Lock bike during cue — participant sits still for EEG
-                if (bikeController != null) bikeController.SetMaxCourseDistance(0f);
+                if (bikeController != null) bikeController.LockBike();
                 break;
             
             case Phase.Countdown:
+                if (profileBar != null) profileBar.Hide();
+                if (bikeController != null) bikeController.LockBike();
                 // Show countdown on cue panel (no black bg)
                 cuePanel.SetActive(true);
                 cueText.text = "3";
@@ -417,22 +474,29 @@ public class HillClimbExperiment : MonoBehaviour
                 break;
                 
             case Phase.HillClimb:
+                if (profileBar != null) profileBar.Show();
                 StartHillClimb();
                 break;
                 
             case Phase.Completed:
+                if (profileBar != null) profileBar.Hide();
                 ShowCompletion(true);
                 break;
                 
             case Phase.Abandoned:
+                if (profileBar != null) profileBar.Hide();
                 ShowCompletion(false);
                 break;
             
             case Phase.RewardQuestion:
+                if (profileBar != null) profileBar.Hide();
                 ShowRewardQuestion();
                 break;
                 
             case Phase.RewardRating:
+                if (profileBar != null) profileBar.Hide();
+                rewardRatingConfirmed = false;
+                rewardResponseCountAtStart = rewardVAS != null ? rewardVAS.GetResponseCount() : 0;
                 ShowRewardRating();
                 break;
         }
@@ -442,6 +506,14 @@ public class HillClimbExperiment : MonoBehaviour
     
     private void Update()
     {
+        // F7 = Force start experiment (debug shortcut)
+        if (!experimentRunning && Input.GetKeyDown(KeyCode.F7))
+        {
+            Debug.Log("[HillExperiment] F7 pressed — FORCE STARTING BLOCK");
+            StartBlock("TEST", 1, ExperimentGroup.Reward);
+            return;
+        }
+
         if (!experimentRunning) return;
         
         float dist = bikeController != null ? bikeController.GetDistance() : 0f;
@@ -452,10 +524,15 @@ public class HillClimbExperiment : MonoBehaviour
             case Phase.HillCue:
                 // Show difficulty cue for 10 seconds (EEG time-locked window)
                 // Bike is locked — participant sits still
-                if (Time.time - phaseStartTime > 10f)
+                float cueElapsed = Time.time - phaseStartTime;
+                if (Time.frameCount % 60 == 0)
+                    Debug.Log($"[HillCue] Waiting... {cueElapsed:F1}s / 10s");
+                
+                if (cueElapsed > 10f)
                 {
                     if (cueBgPanel != null) cueBgPanel.SetActive(false);
                     cuePanel.SetActive(false);
+                    Debug.Log("[HillExperiment] HillCue complete → Countdown");
                     SetPhase(Phase.Countdown);
                 }
                 break;
@@ -484,9 +561,53 @@ public class HillClimbExperiment : MonoBehaviour
                 
             case Phase.Completed:
             case Phase.Abandoned:
-                // Wait 2 seconds then show reward question
-                if (Time.time - phaseStartTime > 2f)
+                // POST-CLIMB REST PERIOD: 5 seconds for pain rating
+                // Pain VAS still visible so participants rate residual pain
+                float restElapsed = Time.time - phaseStartTime;
+                
+                // Update countdown timer on screen
+                int remainingRest = Mathf.CeilToInt(5f - restElapsed);
+                if (completionPanel.activeSelf && completionText != null)
+                {
+                    int condIdx2 = conditionOrder[currentConditionIndex];
+                    HillCondition cond2 = conditions[condIdx2];
+                    bool wasCompleted = (currentPhase == Phase.Completed);
+                    
+                    string timerMsg;
+                    if (wasCompleted)
+                    {
+                        timerMsg = "<size=36><color=#4CAF50>✓ Hill Complete!</color></size>";
+                        if (group == ExperimentGroup.Reward && coinsCollected > 0)
+                            timerMsg += $"\n<size=24><color=#FFD700>Coins earned: {coinsCollected} 🪙</color></size>";
+                    }
+                    else
+                    {
+                        timerMsg = "<size=36><color=#FF5555>Hill Incomplete</color></size>";
+                    }
+                    
+                    timerMsg += "\n\n<size=22><color=#CCCCCC>Rate your pain.</color></size>" +
+                               $"\n\n<size=20><color=#AAAAAA>{remainingRest}s</color></size>";
+                    
+                    completionText.text = timerMsg;
+                }
+                
+                // Send EEG marker at start of rest
+                if (restElapsed < 0.1f)
+                {
+                    if (EventMarkerSender.Instance != null)
+                        EventMarkerSender.Instance.SendEvent("POST_CLIMB_REST_START", 
+                            $"condition={currentConditionIndex + 1},completed={currentPhase == Phase.Completed}");
+                }
+                
+                // After 5s rest, proceed to reward question
+                if (restElapsed > 5f)
+                {
+                    if (EventMarkerSender.Instance != null)
+                        EventMarkerSender.Instance.SendEvent("POST_CLIMB_REST_END", 
+                            $"final_pain_vas={(painVAS != null ? painVAS.GetCurrentValue() : -1f):F1}");
+                    completionPanel.SetActive(false);
                     SetPhase(Phase.RewardQuestion);
+                }
                 break;
             
             case Phase.RewardQuestion:
@@ -496,20 +617,31 @@ public class HillClimbExperiment : MonoBehaviour
                 break;
                 
             case Phase.RewardRating:
-                // Wait for reward VAS to be dismissed
-                if (rewardVAS != null)
+                // Detect reward submission by counting VAS responses
+                // F6 = force skip for experimenter
+                if (Input.GetKeyDown(KeyCode.F6))
                 {
-                    if (Time.time - phaseStartTime > 1f && !rewardVAS.IsShowing())
+                    FinishCondition();
+                }
+                else if (rewardVAS != null && rewardVAS.GetResponseCount() > rewardResponseCountAtStart)
+                {
+                    // Participant submitted a rating — wait 2s then advance
+                    if (!rewardRatingConfirmed)
+                    {
+                        rewardRatingConfirmed = true;
+                        rewardConfirmTime = Time.time;
+                        Debug.Log($"[HillExperiment] Reward rating submitted (count: {rewardVAS.GetResponseCount()})");
+                    }
+                    if (Time.time - rewardConfirmTime > 2f)
                     {
                         FinishCondition();
                     }
                 }
-                else
+                else if (Time.time - phaseStartTime > 60f)
                 {
-                    if (Time.time - phaseStartTime > 3f)
-                    {
-                        FinishCondition();
-                    }
+                    // 60s timeout fallback
+                    Debug.Log("[HillExperiment] Reward timeout (60s)");
+                    FinishCondition();
                 }
                 break;
         }
@@ -547,7 +679,6 @@ public class HillClimbExperiment : MonoBehaviour
         // Create full-screen black overlay for clean EEG recording
         if (cueBgPanel == null)
         {
-            // Use the same parent as cuePanel to ensure correct canvas
             Transform parent = cuePanel.transform.parent;
             cueBgPanel = new GameObject("CueBgPanel");
             cueBgPanel.transform.SetParent(parent, false);
@@ -557,30 +688,66 @@ public class HillClimbExperiment : MonoBehaviour
             bgrt.offsetMin = Vector2.zero;
             bgrt.offsetMax = Vector2.zero;
             Image bgImg = cueBgPanel.AddComponent<Image>();
-            bgImg.color = Color.black;
+            bgImg.color = new Color(0.02f, 0.02f, 0.05f, 1f);
         }
         cueBgPanel.SetActive(true);
         cueBgPanel.transform.SetAsLastSibling();
 
-        // Make cue panel full-screen for this phase
+        // Make cue panel full-screen
         RectTransform cueRect = cuePanel.GetComponent<RectTransform>();
-        cueRect.anchorMin = new Vector2(0.1f, 0.1f);
-        cueRect.anchorMax = new Vector2(0.9f, 0.9f);
+        cueRect.anchorMin = new Vector2(0.05f, 0.05f);
+        cueRect.anchorMax = new Vector2(0.95f, 0.95f);
         cueRect.offsetMin = Vector2.zero;
         cueRect.offsetMax = Vector2.zero;
-        cuePanel.GetComponent<Image>().color = Color.clear; // Transparent bg (black is behind)
+        cuePanel.GetComponent<Image>().color = Color.clear;
 
-        string cueMsg = $"CONDITION {currentConditionIndex + 1} / {conditionOrder.Count}\n\n" +
-                        $"⛰ Gradient: {cond.averageGradient}%\n" +
-                        $"Profile: {(cond.isRolling ? "Rolling" : "Steady")}\n" +
-                        $"Distance: {cond.hillLengthMeters:F0}m\n" +
-                        $"Elevation: +{elevGain:F0}m";
+        // Clear old content
+        foreach (Transform child in cuePanel.transform)
+        {
+            if (child.gameObject.name != "CueText")
+                Destroy(child.gameObject);
+        }
+
+        // --- Difficulty color based on gradient ---
+        Color difficultyColor = GetDifficultyColor(cond.averageGradient);
+        Color dimColor = difficultyColor * 0.4f;
+        dimColor.a = 1f;
+
+        // --- Build visual cue layout ---
+        // 1. Title: "NEXT HILL" with condition counter
+        string titleStr = $"<size=22><color=#888888>CONDITION {currentConditionIndex + 1} / {conditionOrder.Count}</color></size>";
+
+        // 2. Hill silhouette description (gradient as visual angle)
+        float difficultyNorm = Mathf.Clamp01(cond.averageGradient / 12f); // 0-12% mapped to 0-1
+        string difficultyLabel = GetDifficultyLabel(cond.averageGradient);
+        string gradientColorHex = ColorUtility.ToHtmlStringRGB(difficultyColor);
+
+        // 3. Build the visual hill representation using Unicode block characters
+        string hillVisual = BuildHillVisualization(cond.averageGradient, cond.isRolling);
+
+        // 4. Difficulty bar: filled proportional to gradient
+        string diffBar = BuildDifficultyBar(difficultyNorm, gradientColorHex);
+
+        // 5. Compose full message
+        string cueMsg = $"{titleStr}\n\n" +
+                        $"<size=48><color=#{gradientColorHex}>{cond.averageGradient}%</color></size>\n" +
+                        $"<size=28><color=#{gradientColorHex}>{difficultyLabel}</color></size>\n\n" +
+                        $"{hillVisual}\n\n" +
+                        $"{diffBar}\n\n" +
+                        $"<size=20>" +
+                        $"<color=#CCCCCC>Profile:</color> <color=#FFFFFF>{(cond.isRolling ? "Rolling ↝" : "Steady →")}</color>    " +
+                        $"<color=#CCCCCC>Distance:</color> <color=#FFFFFF>{cond.hillLengthMeters:F0}m</color>    " +
+                        $"<color=#CCCCCC>Climb:</color> <color=#FFFFFF>+{elevGain:F0}m</color></size>";
 
         if (group == ExperimentGroup.Reward)
-            cueMsg += $"\n\nCoins: 5 🪙";
+        {
+            int coins = cond.coinReward > 0 ? cond.coinReward : 5;
+            cueMsg += $"\n\n<size=26><color=#FFD700>🪙 × {coins}</color></size>";
+        }
 
         cueText.text = cueMsg;
-        cueText.fontSize = 32;
+        cueText.fontSize = 28;
+        cueText.richText = true;
         cuePanel.SetActive(true);
         cuePanel.transform.SetAsLastSibling();
 
@@ -589,9 +756,107 @@ public class HillClimbExperiment : MonoBehaviour
             EventMarkerSender.Instance.SendEvent("CUE_ONSET", 
                 $"condition={currentConditionIndex + 1},gradient={cond.averageGradient},rolling={cond.isRolling},name={cond.name}");
         Debug.Log($"[EEG] CUE_ONSET — Condition {currentConditionIndex + 1}: {cond.name} ({cond.averageGradient}%)");
+    }
 
-        // Spawn roadside sign
-        SpawnClimbSign(cond);
+    /// <summary>
+    /// Get color representing difficulty: green (easy) → yellow → orange → red (hard)
+    /// </summary>
+    private Color GetDifficultyColor(float gradient)
+    {
+        if (gradient <= 0f) return new Color(0.3f, 0.8f, 0.3f);      // Green - flat
+        if (gradient <= 2f) return new Color(0.4f, 0.85f, 0.3f);     // Light green
+        if (gradient <= 4f) return new Color(0.9f, 0.85f, 0.2f);     // Yellow
+        if (gradient <= 6f) return new Color(1f, 0.6f, 0.15f);       // Orange
+        if (gradient <= 8f) return new Color(1f, 0.35f, 0.1f);       // Dark orange
+        if (gradient <= 10f) return new Color(0.9f, 0.15f, 0.1f);    // Red
+        return new Color(0.8f, 0.05f, 0.2f);                          // Deep red
+    }
+
+    /// <summary>
+    /// Human-readable difficulty label
+    /// </summary>
+    private string GetDifficultyLabel(float gradient)
+    {
+        if (gradient <= 0f) return "FLAT";
+        if (gradient <= 2f) return "EASY";
+        if (gradient <= 4f) return "MODERATE";
+        if (gradient <= 6f) return "CHALLENGING";
+        if (gradient <= 8f) return "HARD";
+        if (gradient <= 10f) return "VERY HARD";
+        return "EXTREME";
+    }
+
+    /// <summary>
+    /// Build an ASCII/Unicode hill visualization showing the climb angle.
+    /// Taller hill = steeper gradient. Rolling shows waves.
+    /// </summary>
+    private string BuildHillVisualization(float gradient, bool isRolling)
+    {
+        // Height of the visual hill (number of rows) scales with gradient
+        int hillHeight = Mathf.Clamp(Mathf.RoundToInt(gradient * 0.8f), 1, 8);
+        int hillWidth = 20;
+        
+        string colorHex = ColorUtility.ToHtmlStringRGB(GetDifficultyColor(gradient));
+        
+        System.Text.StringBuilder sb = new System.Text.StringBuilder();
+        sb.Append("<mspace=0.6em>");
+        
+        if (isRolling)
+        {
+            // Rolling: wave pattern
+            string[] wave = new string[hillHeight + 1];
+            for (int row = hillHeight; row >= 0; row--)
+            {
+                string line = "";
+                for (int col = 0; col < hillWidth; col++)
+                {
+                    float t = (float)col / hillWidth;
+                    float waveH = (Mathf.Sin(t * Mathf.PI * 4f) * 0.3f + 0.7f) * hillHeight;
+                    if (row <= waveH)
+                        line += "█";
+                    else
+                        line += " ";
+                }
+                sb.Append($"<color=#{colorHex}>{line}</color>\n");
+            }
+        }
+        else
+        {
+            // Steady: clean ramp from left to right
+            for (int row = hillHeight; row >= 0; row--)
+            {
+                string line = "";
+                for (int col = 0; col < hillWidth; col++)
+                {
+                    float rampH = ((float)col / hillWidth) * hillHeight;
+                    if (row <= rampH)
+                        line += "█";
+                    else
+                        line += " ";
+                }
+                sb.Append($"<color=#{colorHex}>{line}</color>\n");
+            }
+        }
+        
+        // Ground line
+        sb.Append($"<color=#555555>{new string('▔', hillWidth)}</color>");
+        sb.Append("</mspace>");
+        
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Build a horizontal difficulty bar (filled blocks)
+    /// </summary>
+    private string BuildDifficultyBar(float fillNorm, string colorHex)
+    {
+        int totalBlocks = 12;
+        int filledBlocks = Mathf.Clamp(Mathf.RoundToInt(fillNorm * totalBlocks), 1, totalBlocks);
+        
+        string filled = new string('■', filledBlocks);
+        string empty = new string('□', totalBlocks - filledBlocks);
+        
+        return $"<size=24>DIFFICULTY  <color=#{colorHex}>{filled}</color><color=#444444>{empty}</color></size>";
     }
 
     private GameObject climbSign;
@@ -663,23 +928,44 @@ public class HillClimbExperiment : MonoBehaviour
         hillLength = cond.hillLengthMeters;
         flatApproachLength = cond.flatApproachMeters;
 
-        StartCoroutine(SetCourseLimitDelayed());
+        // CRITICAL: Hide all overlay panels so the cycling scene is visible
+        if (cueBgPanel != null) cueBgPanel.SetActive(false);
+        cuePanel.SetActive(false);
+        completionPanel.SetActive(false);
 
+        // Unlock the bike for riding
+        if (bikeController != null) bikeController.UnlockBike();
+
+        // Reset the bike course NOW (not in a delayed coroutine)
+        if (bikeController != null)
+        {
+            bikeController.ResetCourse();
+            // Total rideable distance = flat approach + hill
+            float totalDistance = flatApproachLength + hillLength;
+            bikeController.SetMaxCourseDistance(totalDistance);
+        }
+
+        // Set phase start distance AFTER reset (should be 0)
         phaseStartDistance = bikeController != null ? bikeController.GetDistance() : 0f;
         noSpeedTimer = 0f;
+
+        // Re-enable all HUD elements for the cycling phase
+        EnableHUDElements();
+
+        Debug.Log($"[HillExperiment] === HILL CLIMB STARTED === {cond.name}, {cond.averageGradient}%, " +
+                  $"distance={flatApproachLength + hillLength}m, experimentRunning={experimentRunning}");
 
         if (painVAS != null) painVAS.Show();
 
         if (group == ExperimentGroup.Reward)
             SpawnCoins(cond.coinReward);
 
-        // Spawn roadside signs at the 50m mark
-        SpawnRoadsideSigns(cond);
-
         if (EventMarkerSender.Instance != null)
             EventMarkerSender.Instance.SendEvent("HILL_START", $"gradient={cond.averageGradient},rolling={cond.isRolling}");
-
-        Debug.Log($"[HillExperiment] Hill started: {cond.name}, {cond.averageGradient}%, {hillLength}m");
+        
+        // Reset EEG epoch tracking for this climb
+        lastEpochMarkerTime = 0f;
+        epochCount = 0;
     }
 
     private List<GameObject> activeSignObjects = new List<GameObject>();
@@ -728,8 +1014,8 @@ public class HillClimbExperiment : MonoBehaviour
 
         if (terrain != null) signPos.y = terrain.SampleHeight(signPos) + 0.1f;
 
-        // Offset to side of road
-        float sideOffset = 8f;
+        // Offset to side of road (far enough to not block the cyclist)
+        float sideOffset = 12f;
         signPos += signRight * (leftSide ? -sideOffset : sideOffset);
 
         GameObject sign = new GameObject($"RoadsideSign_{distanceAlongRoute:F0}m");
@@ -789,12 +1075,44 @@ public class HillClimbExperiment : MonoBehaviour
         if (bar != null) bar.SetTotalRouteLength(hillLength);
     }
     
+    // EEG epoch tracking
+    private float lastEpochMarkerTime = 0f;
+    private float eegEpochInterval = 30f; // Send EEG epoch marker every 30 seconds
+    private int epochCount = 0;
+    
     private void UpdateHillClimb(float dist, float speed)
     {
         float hillDist = dist - phaseStartDistance;
+        float climbElapsed = Time.time - phaseStartTime;
+        
+        // === EEG: Periodic epoch markers for spectral analysis (every 30s) ===
+        if (climbElapsed - lastEpochMarkerTime >= eegEpochInterval)
+        {
+            epochCount++;
+            lastEpochMarkerTime = climbElapsed;
+            
+            float currentPainVAS = painVAS != null ? painVAS.GetCurrentValue() : -1f;
+            float currentGradient = bikeController != null ? bikeController.GetGradient() : 0f;
+            
+            if (EventMarkerSender.Instance != null)
+                EventMarkerSender.Instance.SendEvent("EEG_EPOCH", 
+                    $"epoch={epochCount},elapsed={climbElapsed:F0}s,dist={hillDist:F0}m," +
+                    $"pain_vas={currentPainVAS:F1},gradient={currentGradient:F1},speed={speed:F1}");
+            
+            Debug.Log($"[EEG] EPOCH {epochCount} — {climbElapsed:F0}s, pain={currentPainVAS:F1}, grade={currentGradient:F1}%");
+        }
+        
+        // Debug: log on first frame of hill climb
+        if (Time.frameCount % 60 == 0)
+            Debug.Log($"[HillClimb] dist={dist:F1}, phaseStart={phaseStartDistance:F1}, hillDist={hillDist:F1}, hillLength={hillLength:F1}");
         
         // Quit detection: 5s no pedaling triggers a 10s countdown, then abandon
-        if (!simulationModeActive && speed < quitSpeedThreshold)
+        // SKIP entirely in simulation mode
+        if (simulationModeActive)
+        {
+            noSpeedTimer = 0f; // Never accumulate in sim mode
+        }
+        else if (speed < quitSpeedThreshold)
         {
             noSpeedTimer += Time.deltaTime;
             
@@ -867,23 +1185,37 @@ public class HillClimbExperiment : MonoBehaviour
     
     private void ShowCompletion(bool completed)
     {
-        // Pain VAS stays visible
+        // Keep pain VAS visible for residual pain rating during rest
+        if (painVAS != null) painVAS.Show();
         
+        // Hide the black cue background if it was showing
+        if (cueBgPanel != null) cueBgPanel.SetActive(false);
+        
+        // Show completion message with rest instructions
+        string msg;
         if (completed)
         {
-            string msg = "Hill Complete!";
-            if (group == ExperimentGroup.Reward)
-                msg += $"\n\nCoins earned: {coinsCollected} 🪙";
-            completionText.text = msg;
-            completionText.color = Color.green;
+            msg = "<size=36><color=#4CAF50>✓ Hill Complete!</color></size>";
+            if (group == ExperimentGroup.Reward && coinsCollected > 0)
+                msg += $"\n<size=24><color=#FFD700>Coins earned: {coinsCollected} 🪙</color></size>";
         }
         else
         {
-            completionText.text = "Hill Incomplete!";
-            completionText.color = new Color(1f, 0.3f, 0.3f);
+            msg = "<size=36><color=#FF5555>Hill Incomplete</color></size>";
         }
         
+        msg += "\n\n<size=22><color=#CCCCCC>Please remain still.</color></size>" +
+               "\n<size=22><color=#CCCCCC>Continue rating your pain.</color></size>" +
+               "\n\n<size=18><color=#888888>Rest period: 30 seconds</color></size>";
+        
+        completionText.text = msg;
+        completionText.richText = true;
+        completionText.color = Color.white;
         completionPanel.SetActive(true);
+        
+        // Set resistance to zero so bike freewheels
+        if (bikeController != null)
+            bikeController.SetMaxCourseDistance(0f);
     }
     
     private void ShowRewardQuestion()
@@ -935,8 +1267,14 @@ public class HillClimbExperiment : MonoBehaviour
             rewardVAS.TriggerVASNow("Reward");
     }
     
+    private bool finishingCondition = false; // Guard against double-calling
+    
     private void FinishCondition()
     {
+        // Prevent being called multiple times for the same condition
+        if (finishingCondition) return;
+        finishingCondition = true;
+        
         int condIdx = conditionOrder[currentConditionIndex];
         HillCondition cond = conditions[condIdx];
         
@@ -1062,16 +1400,15 @@ public class HillClimbExperiment : MonoBehaviour
                 float clampedDist = Mathf.Clamp(totalDist, 0f, spline.GetTotalLength() - 1f);
                 SplinePath.SplineSample s = spline.SampleAtDistance(clampedDist);
                 Vector3 pos = s.position;
-                // Place coin at same height as the road + floating offset
-                Terrain terrain = FindObjectOfType<Terrain>();
-                if (terrain != null)
+                // Place coin just above the road surface (use terrain height which matches the road)
+                Terrain t = FindObjectOfType<Terrain>();
+                if (t != null)
                 {
-                    float terrainY = terrain.SampleHeight(pos);
-                    pos.y = Mathf.Max(pos.y, terrainY) + 1.5f;
+                    pos.y = t.SampleHeight(pos) + 0.8f;
                 }
                 else
                 {
-                    pos.y += 1.5f;
+                    pos.y += 0.8f;
                 }
                 coin.transform.position = pos;
             }
@@ -1090,7 +1427,8 @@ public class HillClimbExperiment : MonoBehaviour
     private void CheckCoinCollection(float currentHillDist)
     {
         if (bikeController == null) return;
-        Vector3 bikePos = bikeController.transform.position;
+        
+        float bikeDistance = bikeController.GetDistance();
         
         foreach (GameObject coin in activeCoinObjects)
         {
@@ -1098,21 +1436,23 @@ public class HillClimbExperiment : MonoBehaviour
             CoinData data = coin.GetComponent<CoinData>();
             if (data == null || data.collected) continue;
             
-            // Use horizontal distance only (ignore height difference)
-            Vector3 coinPos = coin.transform.position;
-            float dx = bikePos.x - coinPos.x;
-            float dz = bikePos.z - coinPos.z;
-            float horizontalDist = Mathf.Sqrt(dx * dx + dz * dz);
+            // Coin is placed at spline distance = flatApproachLength + distanceAlongRoute
+            // Collect when bike distance reaches or passes the coin position
+            float coinSplineDist = flatApproachLength + data.distanceAlongRoute;
             
-            if (horizontalDist < 4f)
+            if (bikeDistance >= coinSplineDist - 3f)
             {
                 data.collected = true;
                 coinsCollected++;
                 totalCoinsCollected++;
+                
+                // Animate collection: scale down and disable
+                coin.transform.localScale = Vector3.zero;
                 coin.SetActive(false);
+                
                 UpdateCoinCounter();
                 
-                Debug.Log($"[HillExperiment] 🪙 Coin collected! ({coinsCollected}/5)");
+                Debug.Log($"[HillExperiment] 🪙 Coin collected! ({coinsCollected}/5) at bikeDist={bikeDistance:F0}m, coinDist={coinSplineDist:F0}m");
                 
                 if (EventMarkerSender.Instance != null)
                     EventMarkerSender.Instance.SendEvent("COIN_COLLECTED", $"coin={coinsCollected},total={totalCoinsCollected}");
@@ -1125,7 +1465,38 @@ public class HillClimbExperiment : MonoBehaviour
         if (coinCounterText != null)
         {
             coinCounterText.text = $"🪙 {coinsCollected} / 5";
+            
+            // Flash effect on collection
+            if (coinsCollected > 0)
+            {
+                coinCounterText.fontSize = 26;
+                StartCoroutine(CoinCounterPulse());
+            }
         }
+    }
+    
+    private System.Collections.IEnumerator CoinCounterPulse()
+    {
+        if (coinCounterText == null) yield break;
+        
+        // Brief scale-up pulse
+        float elapsed = 0f;
+        float duration = 0.3f;
+        Color original = coinCounterText.color;
+        
+        while (elapsed < duration)
+        {
+            elapsed += Time.deltaTime;
+            float t = elapsed / duration;
+            float scale = 1f + Mathf.Sin(t * Mathf.PI) * 0.3f;
+            coinCounterText.transform.localScale = Vector3.one * scale;
+            coinCounterText.color = Color.Lerp(Color.white, original, t);
+            yield return null;
+        }
+        
+        coinCounterText.transform.localScale = Vector3.one;
+        coinCounterText.color = original;
+        coinCounterText.fontSize = 20;
     }
     
     private void ClearCoins()

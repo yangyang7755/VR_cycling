@@ -51,22 +51,39 @@ class BikeDeviceHandler:
         Set bike simulation parameters using FTMS Indoor Bike Simulation (opcode 0x11).
         The resistance_level here is actually the GRADIENT in units of 0.1%
         (e.g., 50 = 5.0% grade, 100 = 10.0% grade).
-        
-        This makes the bike feel like riding uphill — much more realistic than
-        the basic resistance level command (0x04).
         """
         try:
-            # Convert resistance_level to grade (it comes as 0-100 representing 0-10% grade)
-            # Map: 0 → 0%, 30 → 0% (flat baseline), 55 → 5%, 80 → 10%
-            # Actually, let's just use it directly as grade × 10
+            control_point_uuid = "00002ad9-0000-1000-8000-00805f9b34fb"
+            
+            # FTMS requires Request Control (0x00) before any commands
+            if not hasattr(self, '_control_requested') or not self._control_requested:
+                try:
+                    # First, enable indications on the FTMS Control Point
+                    # This is required before the bike accepts any write commands
+                    control_point_uuid = "00002ad9-0000-1000-8000-00805f9b34fb"
+                    try:
+                        await client.start_notify(control_point_uuid, lambda s, d: None)
+                        print(f"[{self.device_name}] FTMS Control Point indications enabled")
+                        await asyncio.sleep(0.3)
+                    except Exception as notify_err:
+                        print(f"[{self.device_name}] Could not enable CP indications: {notify_err}")
+                    
+                    # Now request control
+                    await client.write_gatt_char(control_point_uuid, bytes([0x00]), response=True)
+                    self._control_requested = True
+                    print(f"[{self.device_name}] FTMS Control requested ✓")
+                    await asyncio.sleep(0.3)
+                except Exception as e:
+                    print(f"[{self.device_name}] Request control failed (may already be active): {e}")
+                    self._control_requested = True  # Continue anyway
+            
+            # Convert resistance_level to grade
             # Unity sends: flatResistance(30) + slope% × resistancePerPercent(5)
             # So resistance 30 = flat, 55 = 5% grade, 80 = 10% grade
-            # Convert back to grade: grade% = (resistance - 30) / 5
             grade_percent = max(0.0, (resistance_level - 30) / 5.0)
             
             # FTMS Indoor Bike Simulation Parameters (opcode 0x11)
             # Format: [0x11, wind_low, wind_high, grade_low, grade_high, crr, cw]
-            control_point_uuid = "00002ad9-0000-1000-8000-00805f9b34fb"
             
             # Grade in units of 0.01% (sint16): 5.0% = 500
             grade_raw = int(grade_percent * 100)  # e.g., 5.0% → 500
@@ -83,15 +100,18 @@ class BikeDeviceHandler:
             
             command = bytes([0x11]) + wind_bytes + grade_bytes + bytes([crr, cw])
             
-            await client.write_gatt_char(control_point_uuid, command)
-            print(f"[{self.device_name}] Simulation: grade={grade_percent:.1f}% (raw resistance input={resistance_level})")
+            await client.write_gatt_char(control_point_uuid, command, response=True)
+            print(f"[{self.device_name}] Simulation: grade={grade_percent:.1f}% (raw={resistance_level})")
             return True
             
         except Exception as e:
             print(f"[{self.device_name}] Failed to set simulation params: {e}")
+            self._control_requested = False  # Retry request control next time
             # Fallback to basic resistance command
             try:
                 control_point_uuid = "00002ad9-0000-1000-8000-00805f9b34fb"
+                await client.write_gatt_char(control_point_uuid, bytes([0x00]))  # Request control
+                await asyncio.sleep(0.1)
                 command = bytes([0x04, max(0, min(200, resistance_level))])
                 await client.write_gatt_char(control_point_uuid, command)
                 print(f"[{self.device_name}] Fallback: basic resistance={resistance_level}")

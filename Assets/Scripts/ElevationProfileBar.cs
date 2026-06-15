@@ -44,6 +44,7 @@ public class ElevationProfileBar : MonoBehaviour
     private float[] heights;
     private float updateInterval = 0.5f;
     private float lastUpdateTime = 0f;
+    private bool isVisible = false;
 
     private void Start()
     {
@@ -61,7 +62,42 @@ public class ElevationProfileBar : MonoBehaviour
         }
         
         InitializeBar();
+        
+        // Hidden by default — shown when trial starts (HillClimb phase)
+        Hide();
+    }
+
+    /// <summary>
+    /// Show the progress bar (call when HillClimb phase starts)
+    /// </summary>
+    public void Show()
+    {
+        isVisible = true;
+        gameObject.SetActive(true);
+        if (barContainer != null)
+            barContainer.gameObject.SetActive(true);
+        
+        // Also enable all children in case they were hidden
+        foreach (Transform child in transform)
+            child.gameObject.SetActive(true);
+        
         SampleTerrain();
+        Debug.Log("[ElevationProfileBar] SHOWN");
+    }
+
+    /// <summary>
+    /// Hide the progress bar (call during menus, cue screens, etc.)
+    /// </summary>
+    public void Hide()
+    {
+        isVisible = false;
+        if (barContainer != null)
+            barContainer.gameObject.SetActive(false);
+        else
+        {
+            foreach (Transform child in transform)
+                child.gameObject.SetActive(false);
+        }
     }
 
     private void InitializeBar()
@@ -102,64 +138,132 @@ public class ElevationProfileBar : MonoBehaviour
 
     private void SampleTerrain()
     {
-        if (terrain == null) return;
-        
         gradients = new float[segmentCount];
         heights = new float[segmentCount];
         
         float currentDistance = bikeController.GetDistance();
-        float sampleInterval = previewDistance / segmentCount;
         
-        // Get road center Z (assuming road is along X axis)
+        // Priority: Use CurvedRouteGenerator's elevation profile
+        CurvedRouteGenerator routeGen = FindObjectOfType<CurvedRouteGenerator>();
+        if (routeGen != null && routeGen.GetElevationProfile() != null)
+        {
+            float routeLength = routeGen.GetRouteLength();
+            float sampleInterval = routeLength / segmentCount;
+            
+            float minHeight = float.MaxValue;
+            float maxHeight = float.MinValue;
+            
+            float[] profile = routeGen.GetElevationProfile();
+            
+            for (int i = 0; i < segmentCount; i++)
+            {
+                float distance = i * sampleInterval;
+                int idx = Mathf.Clamp(Mathf.RoundToInt(distance), 0, profile.Length - 1);
+                heights[i] = profile[idx];
+                
+                if (heights[i] < minHeight) minHeight = heights[i];
+                if (heights[i] > maxHeight) maxHeight = heights[i];
+                
+                // Gradient from profile
+                int gradIdx = Mathf.Clamp(Mathf.RoundToInt(distance), 1, profile.Length - 1);
+                gradients[i] = (profile[gradIdx] - profile[gradIdx - 1]) * 100f;
+            }
+            
+            // Normalize heights for visual display
+            float heightRange = maxHeight - minHeight;
+            if (heightRange < 0.1f) heightRange = 10f;
+            
+            float segmentWidth = barWidth / segmentCount;
+            
+            for (int i = 0; i < segments.Count && i < segmentCount; i++)
+            {
+                Image seg = segments[i];
+                RectTransform rect = seg.GetComponent<RectTransform>();
+                
+                float normalizedHeight = (heights[i] - minHeight) / heightRange;
+                float segHeight = Mathf.Lerp(minSegmentHeight, maxSegmentHeight, normalizedHeight);
+                
+                Color color = GetGradientColor(gradients[i]);
+                
+                // Darken segments the bike has passed
+                float segDist = (float)i / segmentCount * routeLength;
+                if (segDist < currentDistance)
+                    color *= new Color(0.6f, 0.6f, 0.6f, 1f);
+                
+                rect.sizeDelta = new Vector2(segmentWidth, segHeight);
+                seg.color = color;
+            }
+            
+            // Update marker position along the bar
+            if (currentPositionMarker != null)
+            {
+                float progress = Mathf.Clamp01(currentDistance / routeLength);
+                float xPos = progress * barWidth;
+                
+                int segIdx = Mathf.Clamp(Mathf.FloorToInt(progress * segmentCount), 0, segmentCount - 1);
+                float normH = (heights[segIdx] - minHeight) / heightRange;
+                float yPos = Mathf.Lerp(minSegmentHeight, maxSegmentHeight, normH);
+                
+                currentPositionMarker.anchoredPosition = new Vector2(xPos, yPos);
+            }
+            
+            return;
+        }
+        
+        // Fallback: sample terrain along X axis (old behavior)
+        if (terrain == null) return;
+        
+        float sampleInt = previewDistance / segmentCount;
         float roadZ = terrain.transform.position.z;
         
-        // Sample terrain ahead
-        float minHeight = float.MaxValue;
-        float maxHeight = float.MinValue;
+        float fallbackMinHeight = float.MaxValue;
+        float fallbackMaxHeight = float.MinValue;
         
         for (int i = 0; i < segmentCount; i++)
         {
-            float distance = currentDistance + (i * sampleInterval);
+            float distance = currentDistance + (i * sampleInt);
             Vector3 pos = new Vector3(distance, 0f, roadZ);
             float height = terrain.SampleHeight(pos);
             
             heights[i] = height;
-            if (height < minHeight) minHeight = height;
-            if (height > maxHeight) maxHeight = height;
+            if (height < fallbackMinHeight) fallbackMinHeight = height;
+            if (height > fallbackMaxHeight) fallbackMaxHeight = height;
             
-            // Calculate gradient
             Vector3 posAhead = new Vector3(distance + 5f, 0f, roadZ);
             float heightAhead = terrain.SampleHeight(posAhead);
             float gradient = ((heightAhead - height) / 5f) * 100f;
             gradients[i] = Mathf.Clamp(gradient, -12f, 12f);
         }
         
-        // Normalize heights for visual display
-        float heightRange = maxHeight - minHeight;
-        if (heightRange < 0.1f) heightRange = 10f;
+        float fallbackHeightRange = fallbackMaxHeight - fallbackMinHeight;
+        if (fallbackHeightRange < 0.1f) fallbackHeightRange = 10f;
         
-        // Update segment visuals
-        float segmentWidth = barWidth / segmentCount;
+        float fallbackSegWidth = barWidth / segmentCount;
         
         for (int i = 0; i < segments.Count && i < segmentCount; i++)
         {
             Image seg = segments[i];
             RectTransform rect = seg.GetComponent<RectTransform>();
             
-            // Calculate height based on elevation
-            float normalizedHeight = (heights[i] - minHeight) / heightRange;
+            float normalizedHeight = (heights[i] - fallbackMinHeight) / fallbackHeightRange;
             float segHeight = Mathf.Lerp(minSegmentHeight, maxSegmentHeight, normalizedHeight);
             
-            // Set color based on gradient
             Color color = GetGradientColor(gradients[i]);
             
-            rect.sizeDelta = new Vector2(segmentWidth, segHeight);
+            rect.sizeDelta = new Vector2(fallbackSegWidth, segHeight);
             seg.color = color;
+        }
+        
+        if (currentPositionMarker != null)
+        {
+            currentPositionMarker.anchoredPosition = new Vector2(0f, barHeight * 0.5f);
         }
     }
 
     private void Update()
     {
+        if (!isVisible) return;
+        
         if (Time.time - lastUpdateTime < updateInterval)
             return;
         
@@ -174,14 +278,16 @@ public class ElevationProfileBar : MonoBehaviour
             float gradient = bikeController.GetGradient();
             string sign = gradient >= 0 ? "+" : "";
             currentGradientText.text = $"{sign}{gradient:F1}%";
-        }
-        
-        // Update marker position (always at start since we're showing "ahead")
-        if (currentPositionMarker != null)
-        {
-            currentPositionMarker.anchoredPosition = new Vector2(0f, barHeight * 0.5f);
-            if (markerImage != null)
-                markerImage.color = markerColor;
+            
+            // Color code the gradient text
+            if (Mathf.Abs(gradient) < 2f)
+                currentGradientText.color = new Color(0.3f, 0.9f, 0.3f); // green
+            else if (Mathf.Abs(gradient) < 5f)
+                currentGradientText.color = new Color(1f, 0.85f, 0.1f); // yellow
+            else if (Mathf.Abs(gradient) < 8f)
+                currentGradientText.color = new Color(1f, 0.5f, 0.1f); // orange
+            else
+                currentGradientText.color = new Color(1f, 0.2f, 0.1f); // red
         }
     }
 

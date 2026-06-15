@@ -38,6 +38,9 @@ public class RoadsideEnvironment : MonoBehaviour
     [Tooltip("Spawn simple trees along the road")]
     [SerializeField] private bool spawnTrees = true;
     
+    [Tooltip("Tree prefabs to use (if empty, uses procedural trees)")]
+    [SerializeField] private GameObject[] treePrefabs;
+    
     [Tooltip("Spacing between trees (meters)")]
     [SerializeField] private float treeSpacing = 25f;
     
@@ -100,13 +103,14 @@ public class RoadsideEnvironment : MonoBehaviour
     private Material treeLeafMat;
     private Material grassMat;
     private Material barrierMat;
+    private SplinePath cachedSpline;
 
     private void Start()
     {
         if (bikeController == null) bikeController = FindObjectOfType<BikeController>();
         if (terrain == null) terrain = FindObjectOfType<Terrain>();
         
-        objectParent = new GameObject("RoadsideObjects").transform;
+        objectParent = new GameObject("SideAssets").transform;
         objectParent.SetParent(transform);
         
         postMat = CreateMat(postColor);
@@ -116,6 +120,20 @@ public class RoadsideEnvironment : MonoBehaviour
         barrierMat = CreateMat(new Color(0.9f, 0.9f, 0.9f));
         
         UpdateObjects();
+    }
+
+    /// <summary>
+    /// Clear all spawned roadside objects. Call this when a new route is generated
+    /// so stale objects from the previous trial are removed before the bike resets.
+    /// </summary>
+    public void ClearAll()
+    {
+        foreach (var kvp in activeObjects)
+        {
+            if (kvp.Value != null) Destroy(kvp.Value);
+        }
+        activeObjects.Clear();
+        cachedSpline = null;
     }
     
     private void Update()
@@ -133,8 +151,14 @@ public class RoadsideEnvironment : MonoBehaviour
 
         float bikeDistance = bikeController.GetDistance();
 
-        // Try to use SplinePath for accurate placement along curved road
-        SplinePath spline = FindObjectOfType<SplinePath>();
+        // Cache spline reference (refreshed on ClearAll)
+        if (cachedSpline == null)
+        {
+            CurvedRouteGenerator routeGen = FindObjectOfType<CurvedRouteGenerator>();
+            if (routeGen != null) cachedSpline = routeGen.GetSplinePath();
+            if (cachedSpline == null) cachedSpline = FindObjectOfType<SplinePath>();
+        }
+        SplinePath spline = cachedSpline;
         bool useSpline = spline != null && spline.GetTotalLength() > 0f;
 
         Vector3 bikePos = bikeController.transform.position;
@@ -216,6 +240,11 @@ public class RoadsideEnvironment : MonoBehaviour
                 float lateralDist = treeOffset + randOffset;
 
                 Vector3 treePos = worldPos + right * side * lateralDist;
+                
+                // Skip if this position lands on or too close to the road (tight curves)
+                if (useSpline && IsPositionOnRoad(treePos, spline, 2f))
+                    continue;
+                
                 float height = Mathf.Lerp(treeHeightRange.x, treeHeightRange.y, Mathf.PerlinNoise(seed, 20f));
                 SpawnTree(treePos, height, key);
                 
@@ -223,8 +252,12 @@ public class RoadsideEnvironment : MonoBehaviour
                 if (Mathf.PerlinNoise(seed, 60f) > 0.4f)
                 {
                     Vector3 otherPos = worldPos - right * side * (treeOffset + (Mathf.PerlinNoise(seed + 1f, 0f) - 0.5f) * treeRandomOffset * 2f);
-                    float otherHeight = Mathf.Lerp(treeHeightRange.x, treeHeightRange.y, Mathf.PerlinNoise(seed + 1f, 20f));
-                    SpawnTree(otherPos, otherHeight, key + 2);
+                    
+                    if (!useSpline || !IsPositionOnRoad(otherPos, spline, 2f))
+                    {
+                        float otherHeight = Mathf.Lerp(treeHeightRange.x, treeHeightRange.y, Mathf.PerlinNoise(seed + 1f, 20f));
+                        SpawnTree(otherPos, otherHeight, key + 2);
+                    }
                 }
             }
         }
@@ -258,6 +291,11 @@ public class RoadsideEnvironment : MonoBehaviour
                 {
                     float lateralDist = forestOffset + (Mathf.PerlinNoise(seed + side, 0f) - 0.5f) * 15f;
                     Vector3 treePos = worldPos + right * side * lateralDist;
+                    
+                    // Skip if lands on road (unlikely at forest distance but safety check)
+                    if (useSpline && IsPositionOnRoad(treePos, spline, 2f))
+                        continue;
+                    
                     float height = Mathf.Lerp(forestHeightRange.x, forestHeightRange.y, Mathf.PerlinNoise(seed + side, 30f));
                     SpawnTree(treePos, height, key + (side == -1 ? 0 : 1));
                 }
@@ -318,10 +356,17 @@ public class RoadsideEnvironment : MonoBehaviour
                 float side = Mathf.PerlinNoise(seed, 30f) > 0.5f ? 1f : -1f;
                 float offset = grassOffset + (Mathf.PerlinNoise(seed, 40f) - 0.5f) * 6f;
                 
-                SpawnGrassBush(worldPos + right * side * offset, key);
+                Vector3 grassPos = worldPos + right * side * offset;
+                if (!useSpline || !IsPositionOnRoad(grassPos, spline, 1f))
+                    SpawnGrassBush(grassPos, key);
+                
                 // Sometimes spawn on both sides
                 if (Mathf.PerlinNoise(seed, 50f) > 0.6f)
-                    SpawnGrassBush(worldPos - right * side * offset, key + 1);
+                {
+                    Vector3 otherGrassPos = worldPos - right * side * offset;
+                    if (!useSpline || !IsPositionOnRoad(otherGrassPos, spline, 1f))
+                        SpawnGrassBush(otherGrassPos, key + 1);
+                }
             }
         }
         
@@ -354,6 +399,35 @@ public class RoadsideEnvironment : MonoBehaviour
         }
     }
     
+    /// <summary>
+    /// Check whether a world position is safely away from the road surface.
+    /// On tight curves, a perpendicular offset from one spline point may still
+    /// overlap with the road at a nearby section. This does a coarse distance check.
+    /// </summary>
+    private bool IsPositionOnRoad(Vector3 worldPos, SplinePath spline, float safetyMargin)
+    {
+        if (spline == null) return false;
+        
+        float routeLength = spline.GetTotalLength();
+        float halfRoad = (roadWidth * 0.5f) + safetyMargin;
+        
+        // Coarse scan: check every 15m
+        float bestSqDist = float.MaxValue;
+        float coarseStep = 15f;
+        
+        for (float d = 0f; d <= routeLength; d += coarseStep)
+        {
+            SplinePath.SplineSample s = spline.SampleAtDistance(d);
+            float sq = (new Vector3(worldPos.x, 0f, worldPos.z) - new Vector3(s.position.x, 0f, s.position.z)).sqrMagnitude;
+            if (sq < bestSqDist) bestSqDist = sq;
+            
+            // Early out: if already clearly far from road, no need to keep checking
+            if (bestSqDist > halfRoad * halfRoad * 4f) continue;
+        }
+        
+        return Mathf.Sqrt(bestSqDist) < halfRoad;
+    }
+
     private void SpawnPost(Vector3 worldPos, int key)
     {
         float terrainY = terrain.SampleHeight(worldPos);
@@ -375,21 +449,48 @@ public class RoadsideEnvironment : MonoBehaviour
     
     private void SpawnTree(Vector3 worldPos, float height, int key)
     {
-        float terrainY = terrain.SampleHeight(worldPos);
+        // Ground to sculpted terrain height at this XZ position.
+        // The terrain has been sculpted to follow the road elevation and blend
+        // outward, so terrain.SampleHeight gives the correct ground level for
+        // roadside objects regardless of their distance from the road.
+        float terrainY = terrain != null ? terrain.SampleHeight(worldPos) : 0f;
         worldPos.y = terrainY;
 
-        GameObject tree = new GameObject("Tree");
+        GameObject tree;
+
+        // Use prefabs if available, otherwise fall back to procedural
+        if (treePrefabs != null && treePrefabs.Length > 0)
+        {
+            // Pick a random prefab based on position (deterministic)
+            int prefabIndex = Mathf.Abs((int)(worldPos.x * 7f + worldPos.z * 13f)) % treePrefabs.Length;
+            GameObject prefab = treePrefabs[prefabIndex];
+            
+            if (prefab != null)
+            {
+                tree = Instantiate(prefab, worldPos, Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f));
+                tree.transform.SetParent(objectParent);
+                
+                // Scale based on height parameter
+                float scale = height / 6f; // Normalize around 6m as "standard" tree height
+                scale = Mathf.Clamp(scale, 0.5f, 2.5f);
+                tree.transform.localScale = Vector3.one * scale;
+                
+                activeObjects[key] = tree;
+                return;
+            }
+        }
+
+        // Fallback: procedural tree (sphere + cylinder)
+        tree = new GameObject("Tree");
         tree.transform.SetParent(objectParent);
         tree.transform.position = worldPos;
 
-        // Randomize tree style based on position
         float styleSeed = worldPos.x * 0.1f + worldPos.z * 0.07f;
-        int style = Mathf.FloorToInt(Mathf.PerlinNoise(styleSeed, 0f) * 3f); // 0, 1, or 2
+        int style = Mathf.FloorToInt(Mathf.PerlinNoise(styleSeed, 0f) * 3f);
 
         float trunkHeight = height * UnityEngine.Random.Range(0.25f, 0.4f);
         float trunkWidth = UnityEngine.Random.Range(0.15f, 0.35f);
 
-        // Trunk
         GameObject trunk = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
         trunk.transform.SetParent(tree.transform);
         trunk.transform.localPosition = Vector3.up * trunkHeight;
@@ -399,10 +500,8 @@ public class RoadsideEnvironment : MonoBehaviour
         Collider tc = trunk.GetComponent<Collider>();
         if (tc != null) Destroy(tc);
 
-        // Canopy varies by style
         if (style == 0)
         {
-            // Round canopy (deciduous)
             GameObject canopy = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             canopy.transform.SetParent(tree.transform);
             float canopySize = height * UnityEngine.Random.Range(0.4f, 0.6f);
@@ -415,7 +514,6 @@ public class RoadsideEnvironment : MonoBehaviour
         }
         else if (style == 1)
         {
-            // Conifer / pine (tall narrow)
             int layers = UnityEngine.Random.Range(2, 4);
             for (int i = 0; i < layers; i++)
             {
@@ -425,8 +523,6 @@ public class RoadsideEnvironment : MonoBehaviour
                 float layerSize = height * (0.45f - i * 0.1f);
                 cone.transform.localPosition = Vector3.up * layerY;
                 cone.transform.localScale = new Vector3(layerSize, layerSize * 0.5f, layerSize);
-
-                // Darker green for conifers
                 Material coniferMat = CreateMat(new Color(0.1f, 0.35f, 0.1f));
                 cone.GetComponent<Renderer>().material = coniferMat;
                 cone.GetComponent<Renderer>().shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
@@ -436,7 +532,6 @@ public class RoadsideEnvironment : MonoBehaviour
         }
         else
         {
-            // Bushy / wide canopy
             GameObject canopy = GameObject.CreatePrimitive(PrimitiveType.Sphere);
             canopy.transform.SetParent(tree.transform);
             float canopyW = height * UnityEngine.Random.Range(0.5f, 0.8f);

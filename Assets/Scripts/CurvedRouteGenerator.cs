@@ -91,18 +91,26 @@ public class CurvedRouteGenerator : MonoBehaviour
     [Tooltip("Shoulder width on each side (meters)")]
     [SerializeField] private float shoulderWidth = 4f;
     
-    [Tooltip("Paint road texture on terrain")]
-    [SerializeField] private bool paintRoadTexture = true;
+    [Tooltip("Paint road texture on terrain (disable if using road mesh overlay)")]
+    [SerializeField] private bool paintRoadTexture = false;
     
     [Tooltip("Road terrain layer index (in terrain layers array)")]
     [SerializeField] private int roadLayerIndex = 1;
+    
+    [Tooltip("Custom road material (e.g. EasyRoads3D material). If null, uses procedural asphalt.")]
+    [SerializeField] private Material customRoadMaterial;
+    
+    [Header("Visual Gradient Exaggeration")]
+    [Tooltip("Multiply the visual elevation by this factor. Real gradient is used for physics/resistance. Higher values make hills visually dramatic.")]
+    [Range(1f, 15f)]
+    [SerializeField] private float visualGradientMultiplier = 8f;
     
     [Header("Randomization")]
     [SerializeField] private bool useRandomSeed = true;
     [SerializeField] private int seed = 42;
     
     [Header("Auto-Generate")]
-    [Tooltip("Generate a random route on scene start. DISABLE this when using ExperimentController — it will call GenerateRoute() with the correct gradient per trial.")]
+    [Tooltip("Generate a default route on scene start. Set to false when using HillClimbExperiment — it generates per trial.")]
     [SerializeField] private bool generateOnStart = false;
     
     [Header("── Manual Gradient Override ──────────────────────")]
@@ -225,14 +233,28 @@ public class CurvedRouteGenerator : MonoBehaviour
         float splineLen = splinePath.GetTotalLength();
         elevationProfile = GenerateDetailedElevationProfile(Mathf.CeilToInt(splineLen));
 
-        // 4. Apply elevation to control points
-        ApplyElevationToControlPoints(points);
+        // 3b. Create visually exaggerated profile for terrain/road (physics uses original)
+        float[] visualProfile = new float[elevationProfile.Length];
+        float profileBase = elevationProfile[0];
+        for (int i = 0; i < elevationProfile.Length; i++)
+        {
+            float rise = elevationProfile[i] - profileBase;
+            visualProfile[i] = profileBase + rise * visualGradientMultiplier;
+        }
+
+        // 4. Apply VISUAL elevation to control points (terrain looks steeper)
+        ApplyElevationToControlPoints(points, visualProfile);
         splinePath.SetControlPoints(points);
 
-        // 5. Sculpt terrain
-        SculptTerrainAlongPath();
+        // 5. Sculpt terrain using visual profile
+        SculptTerrainAlongPath(visualProfile);
         terrain.terrainData.SyncHeightmap();
         terrain.Flush();
+
+        // Verify terrain position after sculpting
+        Debug.Log($"[CurvedRouteGenerator] Post-sculpt: terrain.position.y={terrain.transform.position.y:F2}, " +
+                  $"terrainData.size={terrain.terrainData.size}, " +
+                  $"SampleHeight at start={terrain.SampleHeight(splinePath.SampleAtDistance(0f).position):F2}");
 
         if (paintRoadTexture) PaintRoadOnTerrain();
 
@@ -247,6 +269,9 @@ public class CurvedRouteGenerator : MonoBehaviour
             bikeController.SetMaxCourseDistance(splineLen);
 
         NotifyTerrainChanged();
+
+        // 9. Spawn roadside objects along the curved path (grounded to sculpted terrain)
+        SpawnRoadsideAssets();
 
         if (showDebugInfo)
             LogRouteStatistics();
@@ -265,6 +290,22 @@ public class CurvedRouteGenerator : MonoBehaviour
         DisableIfExists<ContinuousTerrainSystem>();
         DisableIfExists<SeamlessTerrainLoop>();
         DisableIfExists<ImprovedCyclingSetup>();
+        DisableIfExists<CurvatureIllusion>();
+        DisableIfExists<EnhancedSlopeVisualizer>();
+        DisableIfExists<LongRouteTerrainBuilder>();
+        DisableIfExists<CompleteSceneReset>();
+
+        // Destroy any existing road meshes from other generators
+        string[] oldRoadNames = { "Road", "StraightRoad", "RoadMesh", "RoadSurface", "GeneratedRoad" };
+        foreach (string name in oldRoadNames)
+        {
+            GameObject obj = GameObject.Find(name);
+            if (obj != null)
+            {
+                Destroy(obj);
+                Debug.Log($"[CurvedRouteGenerator] Destroyed old road object: {name}");
+            }
+        }
 
         // CRITICAL: Stop ConfigurableTrialSequence from regenerating terrain on trial start
         var trialSeq = FindObjectOfType<ConfigurableTrialSequence>();
@@ -286,6 +327,19 @@ public class CurvedRouteGenerator : MonoBehaviour
         if (comp != null && comp.enabled)
         {
             comp.enabled = false;
+            
+            // Also clear any mesh this component generated
+            MeshFilter mf = comp.GetComponent<MeshFilter>();
+            if (mf != null && mf.mesh != null)
+            {
+                mf.mesh = null;
+            }
+            MeshRenderer meshRend = comp.GetComponent<MeshRenderer>();
+            if (meshRend != null)
+            {
+                meshRend.enabled = false;
+            }
+            
             Debug.Log($"[CurvedRouteGenerator] Disabled {typeof(T).Name}");
         }
     }
@@ -635,20 +689,20 @@ public class CurvedRouteGenerator : MonoBehaviour
     /// Map the per-meter elevation profile onto the spline control points.
     /// Each control point gets the elevation at its distance along the spline.
     /// </summary>
-    private void ApplyElevationToControlPoints(List<Vector3> points)
+    private void ApplyElevationToControlPoints(List<Vector3> points, float[] profile = null)
     {
-        if (elevationProfile == null || elevationProfile.Length == 0) return;
+        float[] useProfile = profile ?? elevationProfile;
+        if (useProfile == null || useProfile.Length == 0) return;
         
         float totalLen = splinePath.GetTotalLength();
         
         for (int i = 0; i < points.Count; i++)
         {
-            // Find this control point's approximate distance along the spline
             float t = (float)i / (points.Count - 1);
             float dist = t * totalLen;
             
-            int profileIdx = Mathf.Clamp(Mathf.RoundToInt(dist), 0, elevationProfile.Length - 1);
-            float elevation = elevationProfile[profileIdx];
+            int profileIdx = Mathf.Clamp(Mathf.RoundToInt(dist), 0, useProfile.Length - 1);
+            float elevation = useProfile[profileIdx];
             
             points[i] = new Vector3(points[i].x, elevation, points[i].z);
         }
@@ -691,71 +745,99 @@ public class CurvedRouteGenerator : MonoBehaviour
     }
     
     /// <summary>
-    /// Sculpt the terrain heightmap to follow the spline path.
-    /// Uses the per-meter elevation profile for detailed gradient variation.
-    /// Road surface is flat, terrain blends outward with natural noise.
+    /// Sculpt the ENTIRE terrain heightmap to follow the spline path elevation.
+    /// Every point on the terrain is set to the elevation of the nearest road point,
+    /// with gentle noise added further from the road. This ensures the ground level
+    /// always matches the road — no flat plains at the wrong height.
     /// </summary>
-    private void SculptTerrainAlongPath()
+    private void SculptTerrainAlongPath(float[] visualProfile = null)
     {
         TerrainData td = terrain.terrainData;
         int res = td.heightmapResolution;
         float[,] heights = new float[res, res];
         Vector3 terrainPos = terrain.transform.position;
-        Vector3 terrainSize = td.size;
 
         float totalLen = splinePath.GetTotalLength();
         float totalRoadWidth = roadWidth + shoulderWidth * 2f;
 
-        // Convert elevation profile (world metres) directly to normalised [0,1] terrain height.
-        // terrainSize.y is the terrain's maximum height in world metres.
-        // We add terrainPos.y because the terrain may not sit at y=0.
-        float terrainMaxY = terrainSize.y;
-        if (terrainMaxY < 1f) terrainMaxY = 600f; // safety fallback
+        // Use visual profile for terrain sculpting (exaggerated), fall back to physics profile
+        float[] useProfile = visualProfile ?? elevationProfile;
 
-        // If baseElevation is tiny relative to terrainMaxY, auto-scale it so the road
-        // sits at ~15% of terrain height and has room to climb.
-        float effectiveBase = baseElevation;
-        if (effectiveBase < terrainMaxY * 0.05f)
-            effectiveBase = terrainMaxY * 0.15f;
+        // Determine elevation range from the visual profile
+        float profileMin = float.MaxValue, profileMax = float.MinValue;
+        if (useProfile != null && useProfile.Length > 0)
+        {
+            for (int i = 0; i < useProfile.Length; i++)
+            {
+                if (useProfile[i] < profileMin) profileMin = useProfile[i];
+                if (useProfile[i] > profileMax) profileMax = useProfile[i];
+            }
+        }
+        else
+        {
+            profileMin = baseElevation;
+            profileMax = baseElevation + 10f;
+        }
 
-        // Pre-sample spline positions every 3m
-        int splineSamples = Mathf.CeilToInt(totalLen / 3f) + 1;
+        // FORCE terrain Y size to tightly fit the visual profile
+        // This ensures the full heightmap resolution is used for the visible elevation range
+        float profileRange = profileMax - profileMin;
+        if (profileRange < 1f) profileRange = 1f;
+        float desiredTerrainY = profileRange * 1.5f; // 50% margin above and below
+        if (desiredTerrainY < 50f) desiredTerrainY = 50f;
+        
+        Vector3 newSize = td.size;
+        newSize.y = desiredTerrainY;
+        td.size = newSize;
+        
+        // Position terrain Y so the profile sits in the middle
+        float terrainBaseY = profileMin - (desiredTerrainY - profileRange) * 0.25f;
+        terrain.transform.position = new Vector3(terrainPos.x, terrainBaseY, terrainPos.z);
+        terrainPos = terrain.transform.position;
+        
+        float terrainMaxY = desiredTerrainY;
+
+        // Map: normalize profile to fill 15%-85% of the terrain height
+        float targetLow = 0.15f;
+        float targetHigh = 0.85f;
+
+        Debug.Log($"[CurvedRouteGenerator] Sculpt: visual profile {profileMin:F1}m → {profileMax:F1}m " +
+                  $"(range={profileRange:F1}m, ×{visualGradientMultiplier}), " +
+                  $"terrain Y={desiredTerrainY:F0}m at base={terrainBaseY:F1}m");
+
+        // Pre-sample spline positions every 2m
+        int splineSamples = Mathf.CeilToInt(totalLen / 2f) + 1;
         Vector3[] splinePositions = new Vector3[splineSamples];
-        float[] splineHeights   = new float[splineSamples]; // normalised [0,1]
-        float[] splineDistances = new float[splineSamples]; // distance along route
-
-        // Log the actual elevation range for debugging
-        float dbgMin = float.MaxValue, dbgMax = float.MinValue;
+        float[] splineNormHeights = new float[splineSamples];
 
         for (int i = 0; i < splineSamples; i++)
         {
-            float dist = Mathf.Min(i * 3f, totalLen);
+            float dist = Mathf.Min(i * 2f, totalLen);
             SplinePath.SplineSample s = splinePath.SampleAtDistance(dist);
             splinePositions[i] = new Vector3(s.position.x, 0f, s.position.z);
-            splineDistances[i] = dist;
 
-            float worldElev = effectiveBase; // fallback
-            if (elevationProfile != null)
+            float worldElev = baseElevation;
+            if (useProfile != null)
             {
-                int profIdx = Mathf.Clamp(Mathf.RoundToInt(dist), 0, elevationProfile.Length - 1);
-                // Shift profile so it starts at effectiveBase instead of baseElevation
-                worldElev = elevationProfile[profIdx] - baseElevation + effectiveBase;
+                int profIdx = Mathf.Clamp(Mathf.RoundToInt(dist), 0, useProfile.Length - 1);
+                worldElev = useProfile[profIdx];
             }
 
-            // Normalise: world metres → [0,1] relative to terrain height axis
+            // Normalize so terrain world Y matches the spline Y exactly:
+            // terrain.SampleHeight() should return worldElev
+            // SampleHeight returns: terrainPos.y + normH * terrainMaxY = worldElev
+            // So: normH = (worldElev - terrainPos.y) / terrainMaxY
             float normH = (worldElev - terrainPos.y) / terrainMaxY;
-            normH = Mathf.Clamp(normH, 0.01f, 0.95f);
-            splineHeights[i] = normH;
-
-            if (worldElev < dbgMin) dbgMin = worldElev;
-            if (worldElev > dbgMax) dbgMax = worldElev;
+            normH = Mathf.Clamp(normH, 0.01f, 0.99f);
+            splineNormHeights[i] = normH;
         }
 
-        Debug.Log($"[CurvedRouteGenerator] Sculpt: elevation {dbgMin:F1}m → {dbgMax:F1}m " +
-                  $"(rise={dbgMax-dbgMin:F1}m), normalised {splineHeights[0]:F3} → {splineHeights[splineSamples-1]:F3}, " +
-                  $"terrainMaxY={terrainMaxY:F0}m, effectiveBase={effectiveBase:F1}m");
+        Debug.Log($"[CurvedRouteGenerator] Terrain aligned: normH {splineNormHeights[0]:F3} → {splineNormHeights[splineSamples-1]:F3}, " +
+                  $"world Y: {terrainPos.y + splineNormHeights[0]*terrainMaxY:F1}m → " +
+                  $"{terrainPos.y + splineNormHeights[splineSamples-1]*terrainMaxY:F1}m");
 
-        // --- Build heightmap ---
+        // --- Build entire heightmap ---
+        Vector3 terrainSize = td.size; // re-read after resize
         for (int z = 0; z < res; z++)
         {
             for (int x = 0; x < res; x++)
@@ -764,48 +846,51 @@ public class CurvedRouteGenerator : MonoBehaviour
                 float worldZ = terrainPos.z + ((float)z / (res - 1)) * terrainSize.z;
                 Vector3 worldPt = new Vector3(worldX, 0f, worldZ);
 
-                // Find nearest spline sample and its route distance
+                // Find nearest spline sample
                 float nearestSqDist = float.MaxValue;
-                float nearestRoadH  = splineHeights[0];
+                float nearestRoadH = splineNormHeights[0];
                 for (int i = 0; i < splineSamples; i++)
                 {
                     float d = (worldPt - splinePositions[i]).sqrMagnitude;
                     if (d < nearestSqDist)
                     {
                         nearestSqDist = d;
-                        nearestRoadH  = splineHeights[i];
+                        nearestRoadH = splineNormHeights[i];
                     }
                 }
                 float nearestDist = Mathf.Sqrt(nearestSqDist);
 
-                // Landscape noise — only applied OFF the road
+                // Small terrain noise for visual variety
                 float nx = (float)x / (res - 1);
                 float nz = (float)z / (res - 1);
-                float hillNoise = Mathf.PerlinNoise(nx * 4f + currentSeed, nz * 4f) * 0.04f
-                                + Mathf.PerlinNoise(nx * 8f + currentSeed + 50f, nz * 8f) * 0.015f;
+                float noise = Mathf.PerlinNoise(nx * 3f + currentSeed, nz * 3f) * 0.015f
+                            + Mathf.PerlinNoise(nx * 7f + currentSeed + 50f, nz * 7f) * 0.005f;
 
-                float roadInfluence = Mathf.Clamp01(1f - nearestDist / 200f);
-                float roadSmooth    = roadInfluence * roadInfluence * (3f - 2f * roadInfluence);
-                // Landscape = road height + noise, but noise fades to zero near road
-                float landscapeH    = nearestRoadH + hillNoise * (1f - roadSmooth) + (1f - roadSmooth) * 0.02f;
+                float blendStart = totalRoadWidth * 0.5f;
+                float blendEnd = blendStart + 30f;
 
-                if (nearestDist < totalRoadWidth * 0.6f)
-                    heights[z, x] = nearestRoadH;  // road surface: exact profile height
-                else if (nearestDist < totalRoadWidth * 0.6f + 15f)
+                if (nearestDist < blendStart)
                 {
-                    float t = (nearestDist - totalRoadWidth * 0.6f) / 15f;
-                    t = t * t * (3f - 2f * t);
-                    heights[z, x] = Mathf.Lerp(nearestRoadH, landscapeH, t);
+                    // Road surface — exact height, no noise
+                    heights[z, x] = nearestRoadH;
+                }
+                else if (nearestDist < blendEnd)
+                {
+                    float blend = (nearestDist - blendStart) / (blendEnd - blendStart);
+                    blend = blend * blend * (3f - 2f * blend);
+                    heights[z, x] = nearestRoadH + noise * blend;
                 }
                 else
-                    heights[z, x] = landscapeH;
+                {
+                    heights[z, x] = nearestRoadH + noise;
+                }
             }
         }
 
         td.SetHeights(0, 0, heights);
         ClearTerrainAlphamap();
 
-        Debug.Log($"[CurvedRouteGenerator] Terrain sculpted. Road world elevation: {dbgMin:F1}m → {dbgMax:F1}m");
+        Debug.Log("[CurvedRouteGenerator] Terrain sculpted — ground follows road elevation.");
     }
 
     private void ClearTerrainAlphamap()
@@ -921,10 +1006,37 @@ public class CurvedRouteGenerator : MonoBehaviour
         bikeController.ResetCourse();
         bikeController.SetMaxCourseDistance(splinePath.GetTotalLength());
 
+        // Snap camera to follow the bike immediately
+        CyclistCamera cam = FindObjectOfType<CyclistCamera>();
+        if (cam != null)
+        {
+            Vector3 camPos = startPos - start.forward * 6f + Vector3.up * 3f;
+            cam.transform.position = camPos;
+            cam.transform.LookAt(startPos + Vector3.up * 1.5f);
+        }
+
         Debug.Log($"[CurvedRouteGenerator] Bike positioned at {startPos}, facing {start.forward}");
-        Debug.Log($"[CurvedRouteGenerator] BikeObject: {bikeTransform.name}, SplinePath length: {splinePath.GetTotalLength():F0}m");
     }
     
+    private void SpawnRoadsideAssets()
+    {
+        // Clear old roadside objects from previous trial
+        RoadsideEnvironment roadsideEnv = FindObjectOfType<RoadsideEnvironment>();
+        if (roadsideEnv != null)
+        {
+            roadsideEnv.ClearAll();
+            Debug.Log("[CurvedRouteGenerator] Cleared previous roadside objects");
+        }
+
+        TerrainAssetRandomizer assetRandomizer = FindObjectOfType<TerrainAssetRandomizer>();
+        if (assetRandomizer != null)
+        {
+            assetRandomizer.SetSplinePath(splinePath);
+            assetRandomizer.SpawnAlongRoute();
+            Debug.Log("[CurvedRouteGenerator] Triggered roadside asset placement along spline");
+        }
+    }
+
     private void NotifyTerrainChanged()
     {
         ElevationProgressBar bar = FindObjectOfType<ElevationProgressBar>();
@@ -936,9 +1048,19 @@ public class CurvedRouteGenerator : MonoBehaviour
     
     private void GenerateRoadMesh()
     {
-        // Clean up old road
-        GameObject oldRoad = GameObject.Find("CurvedRoad");
-        if (oldRoad != null) Destroy(oldRoad);
+        // Clean up ALL old road objects
+        string[] roadNames = { "CurvedRoad", "Road", "StraightRoad", "RoadMesh", "RoadSurface", "road" };
+        foreach (string name in roadNames)
+        {
+            GameObject old = GameObject.Find(name);
+            if (old != null) Destroy(old);
+        }
+        // Also destroy any objects with "Road" in their name that have MeshRenderer (road meshes)
+        foreach (var roadMR in FindObjectsOfType<MeshRenderer>())
+        {
+            if (roadMR.gameObject.name.Contains("Road") && roadMR.gameObject.name != "CurvedRoad")
+                Destroy(roadMR.gameObject);
+        }
 
         GameObject roadObj = new GameObject("CurvedRoad");
         roadObj.transform.position = Vector3.zero;
@@ -947,16 +1069,24 @@ public class CurvedRouteGenerator : MonoBehaviour
         MeshFilter mf = roadObj.AddComponent<MeshFilter>();
         MeshRenderer mr = roadObj.AddComponent<MeshRenderer>();
 
-        // Material from primitive (correct URP shader)
-        GameObject tempPrim = GameObject.CreatePrimitive(PrimitiveType.Quad);
-        Material roadMat = new Material(tempPrim.GetComponent<Renderer>().sharedMaterial);
-        Destroy(tempPrim);
+        Material roadMat;
+        if (customRoadMaterial != null && customRoadMaterial.shader != null && customRoadMaterial.shader.name != "Hidden/InternalErrorShader")
+        {
+            // Use assigned material (e.g. EasyRoads3D textured road)
+            roadMat = new Material(customRoadMaterial);
+        }
+        else
+        {
+            // Procedural asphalt fallback — simple dark road color
+            GameObject tempPrim = GameObject.CreatePrimitive(PrimitiveType.Quad);
+            roadMat = new Material(tempPrim.GetComponent<Renderer>().sharedMaterial);
+            Destroy(tempPrim);
 
-        // Simple dark asphalt color — no texture to avoid tiling artifacts
-        Color asphalt = new Color(0.18f, 0.18f, 0.2f);
-        if (roadMat.HasProperty("_BaseColor")) roadMat.SetColor("_BaseColor", asphalt);
-        if (roadMat.HasProperty("_Color")) roadMat.SetColor("_Color", asphalt);
-        if (roadMat.HasProperty("_Smoothness")) roadMat.SetFloat("_Smoothness", 0.15f);
+            Color asphalt = new Color(0.22f, 0.22f, 0.25f);
+            if (roadMat.HasProperty("_BaseColor")) roadMat.SetColor("_BaseColor", asphalt);
+            if (roadMat.HasProperty("_Color")) roadMat.SetColor("_Color", asphalt);
+            if (roadMat.HasProperty("_Smoothness")) roadMat.SetFloat("_Smoothness", 0.2f);
+        }
         roadMat.SetInt("_Cull", 0);
 
         mr.material = roadMat;
@@ -974,20 +1104,27 @@ public class CurvedRouteGenerator : MonoBehaviour
         System.Collections.Generic.List<Vector3> leftPts = new System.Collections.Generic.List<Vector3>();
         System.Collections.Generic.List<Vector3> rightPts = new System.Collections.Generic.List<Vector3>();
 
+        int skippedCount = 0;
         for (float dist = 0f; dist <= totalLen; dist += step)
         {
             SplinePath.SplineSample s = splinePath.SampleAtDistance(dist);
             Vector3 l = s.position - s.right * halfW;
             Vector3 r = s.position + s.right * halfW;
 
-            // Skip if outside terrain
+            // Skip if outside terrain (but log if many are skipped)
             if (l.x < tPos.x || l.x > tPos.x + tSize.x || l.z < tPos.z || l.z > tPos.z + tSize.z)
+            {
+                skippedCount++;
                 continue;
+            }
 
             if (terrain != null)
             {
-                l.y = terrain.SampleHeight(l) + 0.08f;
-                r.y = terrain.SampleHeight(r) + 0.08f;
+                // Sample actual terrain height and place road ON TOP of it
+                float terrainHL = terrain.SampleHeight(l);
+                float terrainHR = terrain.SampleHeight(r);
+                l.y = terrainHL + 0.5f;
+                r.y = terrainHR + 0.5f;
             }
 
             leftPts.Add(l);
@@ -995,10 +1132,33 @@ public class CurvedRouteGenerator : MonoBehaviour
         }
 
         int count = leftPts.Count;
+        Debug.Log($"[CurvedRouteGenerator] Road mesh: {count} points collected, {skippedCount} skipped (terrain bounds: pos={tPos}, size={tSize})");
+        
         if (count < 2)
         {
-            Debug.LogWarning("[CurvedRouteGenerator] Not enough road points within terrain bounds!");
-            return;
+            Debug.LogWarning($"[CurvedRouteGenerator] Not enough road points! All {skippedCount} points were outside terrain bounds.");
+            // Try without bounds check as fallback
+            for (float dist = 0f; dist <= totalLen; dist += step)
+            {
+                SplinePath.SplineSample s = splinePath.SampleAtDistance(dist);
+                Vector3 l = s.position - s.right * halfW;
+                Vector3 r = s.position + s.right * halfW;
+                
+                if (terrain != null)
+                {
+                    float terrainHL = terrain.SampleHeight(l);
+                    float terrainHR = terrain.SampleHeight(r);
+                    l.y = terrainHL + 0.5f;
+                    r.y = terrainHR + 0.5f;
+                }
+                
+                leftPts.Add(l);
+                rightPts.Add(r);
+            }
+            count = leftPts.Count;
+            Debug.Log($"[CurvedRouteGenerator] Fallback: collected {count} points without bounds check");
+            
+            if (count < 2) return;
         }
 
         Vector3[] verts = new Vector3[count * 2];

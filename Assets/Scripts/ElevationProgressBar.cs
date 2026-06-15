@@ -92,6 +92,10 @@ public class ElevationProgressBar : MonoBehaviour
         InitializeBar();
         SampleEntireRoute();
         CreateDistanceMarkers();
+        
+        // Hidden by default — only shown during HillClimb phase
+        if (barContainer != null)
+            barContainer.gameObject.SetActive(false);
     }
 
     private void InitializeBar()
@@ -138,8 +142,6 @@ public class ElevationProgressBar : MonoBehaviour
 
     private void SampleEntireRoute()
     {
-        if (terrain == null) return;
-        
         gradients = new float[segmentCount];
         heights = new float[segmentCount];
         distances = new float[segmentCount];
@@ -152,7 +154,7 @@ public class ElevationProgressBar : MonoBehaviour
         {
             SampleFromElevationProfile(routeGen, sampleInterval);
         }
-        else
+        else if (terrain != null)
         {
             // Priority 2: Sample along spline path
             SplinePath splinePath = FindObjectOfType<SplinePath>();
@@ -165,6 +167,19 @@ public class ElevationProgressBar : MonoBehaviour
                 // Fallback: sample along X axis (straight road)
                 SampleAlongXAxis(sampleInterval);
             }
+        }
+        else
+        {
+            // No terrain and no profile — set flat defaults
+            for (int i = 0; i < segmentCount; i++)
+            {
+                heights[i] = 0f;
+                gradients[i] = 0f;
+                distances[i] = i * sampleInterval;
+            }
+            minHeight = 0f;
+            maxHeight = 1f;
+            return;
         }
         
         // Ensure we have some height variation for display
@@ -194,27 +209,39 @@ public class ElevationProgressBar : MonoBehaviour
     private void SampleFromElevationProfile(CurvedRouteGenerator routeGen, float sampleInterval)
     {
         float[] profile = routeGen.GetElevationProfile();
+        if (profile == null || profile.Length < 2)
+        {
+            Debug.LogWarning("[ElevationProgressBar] Elevation profile is null or too short, falling back to terrain sampling");
+            SampleAlongXAxis(sampleInterval);
+            return;
+        }
+        
         minHeight = float.MaxValue;
         maxHeight = float.MinValue;
+        
+        float profileLength = profile.Length - 1; // max valid index
         
         for (int i = 0; i < segmentCount; i++)
         {
             float distance = courseStartDistance + (i * sampleInterval);
             distances[i] = distance;
             
-            heights[i] = routeGen.GetElevationAtDistance(distance);
+            // Sample height directly from profile array for accuracy
+            int idx = Mathf.Clamp(Mathf.RoundToInt(distance), 0, (int)profileLength);
+            heights[i] = profile[idx];
+            
             if (heights[i] < minHeight) minHeight = heights[i];
             if (heights[i] > maxHeight) maxHeight = heights[i];
             
-            if (i > 0)
-            {
-                gradients[i] = routeGen.GetGradientAtDistance(distance);
-            }
-            else
-            {
-                gradients[i] = routeGen.GetGradientAtDistance(distance + 1f);
-            }
+            // Gradient: difference between adjacent profile samples * 100 for percentage
+            int gradIdx = Mathf.Clamp(Mathf.RoundToInt(distance), 1, (int)profileLength);
+            gradients[i] = (profile[gradIdx] - profile[gradIdx - 1]) * 100f;
         }
+        
+        Debug.Log($"[ElevationProgressBar] Sampled from elevation profile: {segmentCount} segments, " +
+                  $"height {minHeight:F1}m → {maxHeight:F1}m (rise={maxHeight-minHeight:F1}m), " +
+                  $"courseStart={courseStartDistance:F0}m, routeLen={totalRouteLength:F0}m, " +
+                  $"profileLen={profile.Length}, grad[50]={gradients[Mathf.Min(50, segmentCount-1)]:F2}%");
     }
     
     private void SampleAlongSpline(SplinePath splinePath, float sampleInterval)
@@ -525,7 +552,8 @@ public class ElevationProgressBar : MonoBehaviour
     }
 
     /// <summary>
-    /// Reset progress bar (call when starting a new trial)
+    /// Reset progress bar (call when starting a new trial).
+    /// Forces immediate re-sampling from the CurvedRouteGenerator elevation profile.
     /// </summary>
     public void ResetProgress()
     {
@@ -533,38 +561,68 @@ public class ElevationProgressBar : MonoBehaviour
         {
             courseStartDistance = bikeController.GetDistance();
         }
+        else
+        {
+            courseStartDistance = 0f;
+        }
+        
+        // Force-find the route generator and check its profile
+        CurvedRouteGenerator routeGen = FindObjectOfType<CurvedRouteGenerator>();
+        if (routeGen != null)
+        {
+            float[] profile = routeGen.GetElevationProfile();
+            float routeLen = routeGen.GetRouteLength();
+            
+            if (profile != null && profile.Length > 1 && routeLen > 0f)
+            {
+                totalRouteLength = routeLen;
+                Debug.Log($"[ElevationProgressBar] ResetProgress: route={routeLen:F0}m, profile={profile.Length} samples, " +
+                          $"courseStart={courseStartDistance:F0}m");
+            }
+            else
+            {
+                Debug.LogWarning($"[ElevationProgressBar] ResetProgress: profile is null or empty! " +
+                                 $"profile={(profile != null ? profile.Length.ToString() : "null")}, routeLen={routeLen:F0}");
+            }
+        }
+        else
+        {
+            Debug.LogWarning("[ElevationProgressBar] ResetProgress: No CurvedRouteGenerator found!");
+        }
+        
         SampleEntireRoute();
+        CreateDistanceMarkers();
+        UpdateSegmentVisuals();
         UpdateProgress();
     }
 
     /// <summary>
-    /// Set total route length and resample
+    /// Set total route length and resample immediately.
+    /// Called from CurvedRouteGenerator.NotifyTerrainChanged() right after
+    /// the elevation profile has been generated.
     /// </summary>
     public void SetTotalRouteLength(float length)
     {
         totalRouteLength = length;
         
-        // Wait a frame for terrain to be fully updated, then resample
-        StartCoroutine(ResampleAfterDelay());
-    }
-    
-    /// <summary>
-    /// Resample terrain after a short delay
-    /// </summary>
-    private System.Collections.IEnumerator ResampleAfterDelay()
-    {
-        // Wait for terrain to be fully updated
-        yield return new WaitForEndOfFrame();
-        yield return new WaitForEndOfFrame();
+        // Reset course start distance — the bike will be reset to 0 for the new trial
+        courseStartDistance = 0f;
         
+        // Ensure segments exist (in case this is called before Start)
+        if (segments == null || segments.Count == 0)
+        {
+            if (bikeController == null) bikeController = FindObjectOfType<BikeController>();
+            if (terrain == null) terrain = FindObjectOfType<Terrain>();
+            InitializeBar();
+        }
+        
+        // Sample immediately — the elevation profile exists right now
         SampleEntireRoute();
         CreateDistanceMarkers();
+        UpdateSegmentVisuals();
         UpdateProgress();
         
-        if (debugMode)
-        {
-            Debug.Log("[ElevationProgressBar] Resampled terrain after route generation");
-        }
+        Debug.Log($"[ElevationProgressBar] SetTotalRouteLength({length:F0}m) — resampled, segments={segments.Count}");
     }
     
     /// <summary>
@@ -572,6 +630,9 @@ public class ElevationProgressBar : MonoBehaviour
     /// </summary>
     public void ResampleTerrain()
     {
-        StartCoroutine(ResampleAfterDelay());
+        SampleEntireRoute();
+        CreateDistanceMarkers();
+        UpdateSegmentVisuals();
+        UpdateProgress();
     }
 }

@@ -337,6 +337,10 @@ public class BluetoothConnectionUI : MonoBehaviour
 
         proceedButton.onClick.AddListener(OnProceedClicked);
 
+        // Skip button (simulation mode — no bike needed)
+        Button skipButton = CreateButton(buttonRow.transform, "SkipBtn", "Skip (Simulation)", 200, new Color(0.7f, 0.5f, 0.1f));
+        skipButton.onClick.AddListener(OnSkipClicked);
+
         uiBuilt = true;
         UnityEngine.Debug.Log("[BluetoothUI] Connection panel built and displayed.");
     }
@@ -604,6 +608,60 @@ public class BluetoothConnectionUI : MonoBehaviour
             trialStarterUI.ShowStartPanel();
 
         UnityEngine.Debug.Log("[BluetoothUI] Devices confirmed — proceeding to trial setup.");
+    }
+
+    private void OnSkipClicked()
+    {
+        // Hide connection panel
+        if (panelObj != null)
+            panelObj.SetActive(false);
+
+        // Enable simulation mode on BikeController
+        BikeController bike = FindObjectOfType<BikeController>();
+        if (bike != null)
+        {
+            bike.SetSimulationMode(true);
+            bike.enabled = true;
+        }
+
+        // Re-enable all HUD elements that might have been hidden
+        ReEnableAllHUD();
+
+        // Show trial starter — try both UI systems
+        if (trialStarterUI != null)
+        {
+            trialStarterUI.ShowStartPanel();
+        }
+        else
+        {
+            StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true);
+            if (startScreen != null)
+            {
+                startScreen.gameObject.SetActive(true);
+                startScreen.SetSimulationMode(true); // Tell StartScreenUI we're in sim mode
+                startScreen.ShowStartScreenManual();
+            }
+        }
+
+        UnityEngine.Debug.Log("[BluetoothUI] SKIPPED — Simulation mode enabled (150W constant).");
+    }
+
+    private void ReEnableAllHUD()
+    {
+        // Re-enable all common HUD components that StartScreenUI might have hidden
+        foreach (var obj in FindObjectsOfType<MonoBehaviour>(true))
+        {
+            string typeName = obj.GetType().Name;
+            if (typeName == "ModernCyclingUI" || typeName == "BikeDataUI" || 
+                typeName == "CyclingHUD" || typeName == "BikeDataDisplay" ||
+                typeName == "EnhancedBikeDataUI" || typeName == "SimpleDataDisplay" ||
+                typeName == "ElevationProgressBar" || typeName == "ElevationProfileBar" ||
+                typeName == "DistanceProgressBar" || typeName == "ContinuousProgressUI" ||
+                typeName == "GradientIndicator")
+            {
+                obj.gameObject.SetActive(true);
+            }
+        }
     }
 
     // =========================================================================

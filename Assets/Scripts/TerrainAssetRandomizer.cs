@@ -2,15 +2,24 @@ using UnityEngine;
 using System.Collections.Generic;
 
 /// <summary>
-/// Randomizes placement of assets (trees, rocks, grass) on terrain
-/// Assets are grounded to terrain height and avoid the road
+/// Randomizes placement of assets (trees, rocks, grass) on terrain.
+/// Spline-aware: places objects along the curved road at proper distance
+/// from the road center, grounded to the sculpted terrain height.
+/// 
+/// Integration:
+///   CurvedRouteGenerator.GenerateRoute() → sculpts terrain → calls SpawnAlongRoute()
+///   Objects are placed at correct ground elevation and never on the road surface.
 /// </summary>
 public class TerrainAssetRandomizer : MonoBehaviour
 {
     [Header("Terrain")]
     [SerializeField] private Terrain terrain;
-    [SerializeField] private float roadWidth = 10f; // Width of road to keep clear
-    [SerializeField] private float roadCenterZ = 0f; // Z position of road center (auto-detected from bike)
+    [SerializeField] private float roadWidth = 12f;
+    [SerializeField] private float shoulderWidth = 4f;
+    
+    [Header("Spline Reference (auto-detected)")]
+    [SerializeField] private SplinePath splinePath;
+    [SerializeField] private CurvedRouteGenerator routeGenerator;
     
     [Header("Asset Prefabs")]
     [SerializeField] private GameObject[] treePrefabs;
@@ -23,6 +32,7 @@ public class TerrainAssetRandomizer : MonoBehaviour
     [SerializeField] private float treeMinScale = 0.8f;
     [SerializeField] private float treeMaxScale = 1.5f;
     [SerializeField] private float treeMinDistanceFromRoad = 15f;
+    [SerializeField] private float treeMaxDistanceFromRoad = 60f;
     
     [Header("Rock Settings")]
     [SerializeField] private bool spawnRocks = true;
@@ -30,6 +40,7 @@ public class TerrainAssetRandomizer : MonoBehaviour
     [SerializeField] private float rockMinScale = 0.5f;
     [SerializeField] private float rockMaxScale = 2f;
     [SerializeField] private float rockMinDistanceFromRoad = 8f;
+    [SerializeField] private float rockMaxDistanceFromRoad = 40f;
     
     [Header("Grass Settings")]
     [SerializeField] private bool spawnGrass = true;
@@ -37,17 +48,19 @@ public class TerrainAssetRandomizer : MonoBehaviour
     [SerializeField] private float grassMinScale = 0.8f;
     [SerializeField] private float grassMaxScale = 1.2f;
     [SerializeField] private float grassMinDistanceFromRoad = 5f;
+    [SerializeField] private float grassMaxDistanceFromRoad = 30f;
     
-    [Header("Placement Area")]
-    [SerializeField] private float placementStartX = 0f; // Start of placement area
-    [SerializeField] private float placementEndX = 500f; // End of placement area
-    [SerializeField] private float placementWidthZ = 100f; // Width on each side of road
-    
-    [Header("Advanced Settings")]
+    [Header("Placement Settings")]
+    [SerializeField] private float placementStepAlongRoute = 10f;
     [SerializeField] private bool randomRotation = true;
     [SerializeField] private bool alignToTerrainNormal = false;
-    [SerializeField] private float maxSlopeAngle = 45f; // Don't place on slopes steeper than this
-    [SerializeField] private LayerMask groundLayer;
+    [SerializeField] private float maxSlopeAngle = 45f;
+    
+    [Header("Fallback (straight road mode)")]
+    [SerializeField] private float roadCenterZ = 0f;
+    [SerializeField] private float placementStartX = 0f;
+    [SerializeField] private float placementEndX = 500f;
+    [SerializeField] private float placementWidthZ = 100f;
     
     [Header("Organization")]
     [SerializeField] private bool organizeInHierarchy = true;
@@ -56,8 +69,6 @@ public class TerrainAssetRandomizer : MonoBehaviour
     [Header("Debug")]
     [SerializeField] private bool showDebugInfo = true;
     [SerializeField] private bool showGizmos = true;
-    [SerializeField] private bool showPlacementDebug = false; // Show each placement attempt
-    [SerializeField] private bool useRaycastForHeight = true; // Use raycast instead of SampleHeight
     
     private GameObject assetsContainer;
     private GameObject treesContainer;
@@ -70,57 +81,296 @@ public class TerrainAssetRandomizer : MonoBehaviour
         if (terrain == null)
             terrain = FindObjectOfType<Terrain>();
         
-        // Auto-detect road center from bike position
+        if (routeGenerator == null)
+            routeGenerator = FindObjectOfType<CurvedRouteGenerator>();
+        
+        if (splinePath == null && routeGenerator != null)
+            splinePath = routeGenerator.GetSplinePath();
+        
+        // Auto-detect road center from bike position (fallback for straight roads)
         BikeController bike = FindObjectOfType<BikeController>();
         if (bike != null)
-        {
             roadCenterZ = bike.transform.position.z;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PUBLIC API — called after route generation
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Spawn roadside assets along the curved spline route.
+    /// Call this AFTER CurvedRouteGenerator.GenerateRoute() has sculpted terrain.
+    /// Objects are placed at proper distance from the road and grounded to terrain height.
+    /// </summary>
+    [ContextMenu("Spawn Along Route")]
+    public void SpawnAlongRoute()
+    {
+        // Refresh references
+        if (routeGenerator == null)
+            routeGenerator = FindObjectOfType<CurvedRouteGenerator>();
+        if (routeGenerator != null)
+            splinePath = routeGenerator.GetSplinePath();
+        if (terrain == null)
+            terrain = FindObjectOfType<Terrain>();
+        
+        if (splinePath == null || splinePath.GetTotalLength() < 10f)
+        {
+            Debug.LogWarning("[AssetRandomizer] No valid spline path found. Falling back to straight-line placement.");
+            SpawnAllAssets();
+            return;
+        }
+
+        ClearAllAssets();
+        CreateContainers();
+        
+        float routeLength = splinePath.GetTotalLength();
+        
+        if (showDebugInfo)
+            Debug.Log($"[AssetRandomizer] Spawning along curved route ({routeLength:F0}m)...");
+        
+        int totalSpawned = 0;
+        
+        if (spawnTrees && HasValidPrefabs(treePrefabs))
+        {
+            int spawned = SpawnAlongSpline(treePrefabs, treeCount, treeMinDistanceFromRoad, treeMaxDistanceFromRoad,
+                                           treeMinScale, treeMaxScale, treesContainer, "tree");
+            totalSpawned += spawned;
+            if (showDebugInfo) Debug.Log($"[AssetRandomizer] Spawned {spawned} trees along route");
         }
         
-        // Don't auto-spawn on start - wait for manual trigger or route generation
+        if (spawnRocks && HasValidPrefabs(rockPrefabs))
+        {
+            int spawned = SpawnAlongSpline(rockPrefabs, rockCount, rockMinDistanceFromRoad, rockMaxDistanceFromRoad,
+                                           rockMinScale, rockMaxScale, rocksContainer, "rock");
+            totalSpawned += spawned;
+            if (showDebugInfo) Debug.Log($"[AssetRandomizer] Spawned {spawned} rocks along route");
+        }
+        
+        if (spawnGrass && HasValidPrefabs(grassPrefabs))
+        {
+            int spawned = SpawnAlongSpline(grassPrefabs, grassCount, grassMinDistanceFromRoad, grassMaxDistanceFromRoad,
+                                           grassMinScale, grassMaxScale, grassContainer, "grass");
+            totalSpawned += spawned;
+            if (showDebugInfo) Debug.Log($"[AssetRandomizer] Spawned {spawned} grass along route");
+        }
+        
+        if (showDebugInfo)
+            Debug.Log($"[AssetRandomizer] Total roadside assets: {totalSpawned}");
     }
 
     /// <summary>
-    /// Spawn all assets
+    /// Spawn assets distributed along the spline, offset to either side of the road.
+    /// Each asset is grounded to the sculpted terrain height at its final position.
     /// </summary>
-    [ContextMenu("Spawn All Assets")]
+    private int SpawnAlongSpline(GameObject[] prefabs, int count, float minDist, float maxDist,
+                                  float minScale, float maxScale, GameObject container, string label)
+    {
+        float routeLength = splinePath.GetTotalLength();
+        int spawned = 0;
+        int maxAttempts = count * 5;
+        int attempts = 0;
+        
+        // Minimum clearance: half road width + shoulder
+        float roadClearance = (roadWidth * 0.5f) + shoulderWidth;
+        float effectiveMinDist = Mathf.Max(minDist, roadClearance + 1f);
+        
+        while (spawned < count && attempts < maxAttempts)
+        {
+            attempts++;
+            
+            // Pick a random distance along the route
+            float dist = Random.Range(0f, routeLength);
+            SplinePath.SplineSample sample = splinePath.SampleAtDistance(dist);
+            
+            // Pick a random side (left or right) and distance from road
+            float side = Random.value > 0.5f ? 1f : -1f;
+            float lateralOffset = Random.Range(effectiveMinDist, maxDist);
+            
+            // Position = road center + lateral offset perpendicular to road direction
+            Vector3 position = sample.position + sample.right * side * lateralOffset;
+            
+            // Ground the object to terrain height
+            float groundHeight = GetTerrainHeight(position);
+            position.y = groundHeight;
+            
+            // Validate: within terrain bounds and not on road
+            if (!IsWithinTerrainBounds(position))
+                continue;
+            
+            // Double-check: measure actual distance to nearest road point to catch tight curves
+            if (!IsSafeFromRoad(position, roadClearance))
+                continue;
+            
+            // Check slope
+            if (!IsValidSlope(position))
+                continue;
+            
+            // Spawn the asset
+            GameObject prefab = null;
+            try { prefab = prefabs[Random.Range(0, prefabs.Length)]; } catch { continue; }
+            if (prefab == null) continue;
+            GameObject obj = Instantiate(prefab, position, Quaternion.identity);
+            
+            // Scale
+            float scale = Random.Range(minScale, maxScale);
+            obj.transform.localScale = Vector3.one * scale;
+            
+            // Rotation
+            if (randomRotation)
+            {
+                if (label == "rock")
+                    obj.transform.rotation = Quaternion.Euler(Random.Range(-10f, 10f), Random.Range(0f, 360f), Random.Range(-10f, 10f));
+                else
+                    obj.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
+            }
+            
+            // Terrain normal alignment
+            if (alignToTerrainNormal || label == "grass")
+                AlignToTerrain(obj.transform, position);
+            
+            // Parent
+            if (organizeInHierarchy && container != null)
+                obj.transform.SetParent(container.transform);
+            
+            spawnedAssets.Add(obj);
+            spawned++;
+        }
+        
+        return spawned;
+    }
+
+    /// <summary>
+    /// Check that a world position is safe distance from the road surface.
+    /// Samples nearby spline points to handle tight curves where a simple
+    /// perpendicular offset might still land on the road.
+    /// </summary>
+    private bool IsSafeFromRoad(Vector3 worldPos, float minClearance)
+    {
+        float routeLength = splinePath.GetTotalLength();
+        float checkStep = 5f; // check every 5m along route
+        float minSqDist = float.MaxValue;
+        
+        // Only check within a reasonable range — full route scan is expensive
+        // Quick broad-phase: find approximate nearest distance using the spline
+        // Sample at coarse intervals to find closest section
+        float bestDist = 0f;
+        float coarseStep = 20f;
+        float bestSqDist = float.MaxValue;
+        
+        for (float d = 0f; d <= routeLength; d += coarseStep)
+        {
+            SplinePath.SplineSample s = splinePath.SampleAtDistance(d);
+            float sq = (new Vector3(worldPos.x, 0f, worldPos.z) - new Vector3(s.position.x, 0f, s.position.z)).sqrMagnitude;
+            if (sq < bestSqDist) { bestSqDist = sq; bestDist = d; }
+        }
+        
+        // Fine-pass around the closest section
+        float searchStart = Mathf.Max(0f, bestDist - coarseStep);
+        float searchEnd = Mathf.Min(routeLength, bestDist + coarseStep);
+        
+        for (float d = searchStart; d <= searchEnd; d += checkStep)
+        {
+            SplinePath.SplineSample s = splinePath.SampleAtDistance(d);
+            float sq = (new Vector3(worldPos.x, 0f, worldPos.z) - new Vector3(s.position.x, 0f, s.position.z)).sqrMagnitude;
+            if (sq < minSqDist) minSqDist = sq;
+        }
+        
+        return Mathf.Sqrt(minSqDist) >= minClearance;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FALLBACK: Original straight-road placement (for non-spline routes)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Legacy spawn method for straight roads (no spline).
+    /// </summary>
+    [ContextMenu("Spawn All Assets (Straight Road)")]
     public void SpawnAllAssets()
     {
         ClearAllAssets();
         CreateContainers();
         
         if (showDebugInfo)
-            Debug.Log($"[AssetRandomizer] Starting asset placement...");
+            Debug.Log($"[AssetRandomizer] Starting straight-road asset placement...");
         
         int totalSpawned = 0;
         
         if (spawnTrees && treePrefabs != null && treePrefabs.Length > 0)
         {
-            int spawned = SpawnTrees();
+            int spawned = SpawnAssetsStraight(treePrefabs, treeCount, treeMinDistanceFromRoad,
+                                              treeMinScale, treeMaxScale, treesContainer);
             totalSpawned += spawned;
-            if (showDebugInfo)
-                Debug.Log($"[AssetRandomizer] ✓ Spawned {spawned} trees");
         }
         
         if (spawnRocks && rockPrefabs != null && rockPrefabs.Length > 0)
         {
-            int spawned = SpawnRocks();
+            int spawned = SpawnAssetsStraight(rockPrefabs, rockCount, rockMinDistanceFromRoad,
+                                              rockMinScale, rockMaxScale, rocksContainer);
             totalSpawned += spawned;
-            if (showDebugInfo)
-                Debug.Log($"[AssetRandomizer] ✓ Spawned {spawned} rocks");
         }
         
         if (spawnGrass && grassPrefabs != null && grassPrefabs.Length > 0)
         {
-            int spawned = SpawnGrass();
+            int spawned = SpawnAssetsStraight(grassPrefabs, grassCount, grassMinDistanceFromRoad,
+                                              grassMinScale, grassMaxScale, grassContainer);
             totalSpawned += spawned;
-            if (showDebugInfo)
-                Debug.Log($"[AssetRandomizer] ✓ Spawned {spawned} grass patches");
         }
         
         if (showDebugInfo)
-            Debug.Log($"[AssetRandomizer] ✓ Total assets spawned: {totalSpawned}");
+            Debug.Log($"[AssetRandomizer] Total assets spawned (straight): {totalSpawned}");
     }
+
+    private int SpawnAssetsStraight(GameObject[] prefabs, int count, float minDistFromRoad,
+                                     float minScale, float maxScale, GameObject container)
+    {
+        int spawned = 0;
+        int maxAttempts = count * 10;
+        int attempts = 0;
+        
+        while (spawned < count && attempts < maxAttempts)
+        {
+            attempts++;
+            
+            float x = Random.Range(placementStartX, placementEndX);
+            float side = Random.value > 0.5f ? 1f : -1f;
+            float zOffset = Random.Range(minDistFromRoad, placementWidthZ);
+            float z = roadCenterZ + (side * zOffset);
+            
+            Vector3 position = new Vector3(x, 0f, z);
+            float height = GetTerrainHeight(position);
+            position.y = height;
+            
+            // Distance from road check
+            float distFromRoad = Mathf.Abs(position.z - roadCenterZ);
+            if (distFromRoad < minDistFromRoad || distFromRoad < roadWidth * 0.5f)
+                continue;
+            
+            if (!IsValidSlope(position))
+                continue;
+            
+            GameObject prefab = prefabs[Random.Range(0, prefabs.Length)];
+            GameObject obj = Instantiate(prefab, position, Quaternion.identity);
+            
+            float scale = Random.Range(minScale, maxScale);
+            obj.transform.localScale = Vector3.one * scale;
+            
+            if (randomRotation)
+                obj.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
+            
+            if (organizeInHierarchy && container != null)
+                obj.transform.SetParent(container.transform);
+            
+            spawnedAssets.Add(obj);
+            spawned++;
+        }
+        
+        return spawned;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // UTILITY
+    // ═══════════════════════════════════════════════════════════════════════════
 
     /// <summary>
     /// Clear all spawned assets
@@ -128,7 +378,6 @@ public class TerrainAssetRandomizer : MonoBehaviour
     [ContextMenu("Clear All Assets")]
     public void ClearAllAssets()
     {
-        // Destroy all tracked assets
         foreach (GameObject asset in spawnedAssets)
         {
             if (asset != null)
@@ -136,17 +385,13 @@ public class TerrainAssetRandomizer : MonoBehaviour
         }
         spawnedAssets.Clear();
         
-        // Destroy containers
         if (assetsContainer != null)
             DestroyImmediate(assetsContainer);
         
         if (showDebugInfo)
-            Debug.Log("[AssetRandomizer] ✓ Cleared all assets");
+            Debug.Log("[AssetRandomizer] Cleared all assets");
     }
 
-    /// <summary>
-    /// Create hierarchy containers
-    /// </summary>
     private void CreateContainers()
     {
         if (organizeInHierarchy)
@@ -166,305 +411,112 @@ public class TerrainAssetRandomizer : MonoBehaviour
     }
 
     /// <summary>
-    /// Spawn trees
+    /// Safely check if a prefab array has at least one valid (non-null) entry.
+    /// Handles Unity's serialized unassigned references without throwing exceptions.
     /// </summary>
-    private int SpawnTrees()
+    private bool HasValidPrefabs(GameObject[] prefabs)
     {
-        int spawned = 0;
-        int attempts = 0;
-        int maxAttempts = treeCount * 10;
-        
-        while (spawned < treeCount && attempts < maxAttempts)
+        if (prefabs == null || prefabs.Length == 0) return false;
+        try
         {
-            attempts++;
-            
-            Vector3 position = GetRandomPosition(treeMinDistanceFromRoad);
-            
-            if (IsValidPlacement(position, treeMinDistanceFromRoad))
+            for (int i = 0; i < prefabs.Length; i++)
             {
-                GameObject prefab = treePrefabs[Random.Range(0, treePrefabs.Length)];
-                GameObject tree = Instantiate(prefab, position, Quaternion.identity);
-                
-                // Random scale
-                float scale = Random.Range(treeMinScale, treeMaxScale);
-                tree.transform.localScale = Vector3.one * scale;
-                
-                // Random rotation
-                if (randomRotation)
-                {
-                    tree.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
-                }
-                
-                // Align to terrain normal
-                if (alignToTerrainNormal)
-                {
-                    AlignToTerrain(tree.transform, position);
-                }
-                
-                // Organize
-                if (organizeInHierarchy && treesContainer != null)
-                {
-                    tree.transform.SetParent(treesContainer.transform);
-                }
-                
-                // Debug visualization
-                if (showPlacementDebug)
-                {
-                    Debug.DrawLine(position, position + Vector3.up * 5f, Color.green, 5f);
-                    Debug.Log($"[AssetRandomizer] Tree placed at ({position.x:F1}, {position.y:F1}, {position.z:F1})");
-                }
-                
-                spawnedAssets.Add(tree);
-                spawned++;
+                if (prefabs[i] != null) return true;
             }
         }
-        
-        return spawned;
-    }
-
-    /// <summary>
-    /// Spawn rocks
-    /// </summary>
-    private int SpawnRocks()
-    {
-        int spawned = 0;
-        int attempts = 0;
-        int maxAttempts = rockCount * 10;
-        
-        while (spawned < rockCount && attempts < maxAttempts)
+        catch (System.Exception)
         {
-            attempts++;
-            
-            Vector3 position = GetRandomPosition(rockMinDistanceFromRoad);
-            
-            if (IsValidPlacement(position, rockMinDistanceFromRoad))
-            {
-                GameObject prefab = rockPrefabs[Random.Range(0, rockPrefabs.Length)];
-                GameObject rock = Instantiate(prefab, position, Quaternion.identity);
-                
-                // Random scale
-                float scale = Random.Range(rockMinScale, rockMaxScale);
-                rock.transform.localScale = Vector3.one * scale;
-                
-                // Random rotation
-                if (randomRotation)
-                {
-                    rock.transform.rotation = Quaternion.Euler(
-                        Random.Range(-10f, 10f),
-                        Random.Range(0f, 360f),
-                        Random.Range(-10f, 10f)
-                    );
-                }
-                
-                // Align to terrain normal
-                if (alignToTerrainNormal)
-                {
-                    AlignToTerrain(rock.transform, position);
-                }
-                
-                // Organize
-                if (organizeInHierarchy && rocksContainer != null)
-                {
-                    rock.transform.SetParent(rocksContainer.transform);
-                }
-                
-                spawnedAssets.Add(rock);
-                spawned++;
-            }
+            return false;
         }
-        
-        return spawned;
+        return false;
     }
 
-    /// <summary>
-    /// Spawn grass
-    /// </summary>
-    private int SpawnGrass()
-    {
-        int spawned = 0;
-        int attempts = 0;
-        int maxAttempts = grassCount * 10;
-        
-        while (spawned < grassCount && attempts < maxAttempts)
-        {
-            attempts++;
-            
-            Vector3 position = GetRandomPosition(grassMinDistanceFromRoad);
-            
-            if (IsValidPlacement(position, grassMinDistanceFromRoad))
-            {
-                GameObject prefab = grassPrefabs[Random.Range(0, grassPrefabs.Length)];
-                GameObject grass = Instantiate(prefab, position, Quaternion.identity);
-                
-                // Random scale
-                float scale = Random.Range(grassMinScale, grassMaxScale);
-                grass.transform.localScale = Vector3.one * scale;
-                
-                // Random rotation
-                if (randomRotation)
-                {
-                    grass.transform.rotation = Quaternion.Euler(0f, Random.Range(0f, 360f), 0f);
-                }
-                
-                // Always align grass to terrain
-                AlignToTerrain(grass.transform, position);
-                
-                // Organize
-                if (organizeInHierarchy && grassContainer != null)
-                {
-                    grass.transform.SetParent(grassContainer.transform);
-                }
-                
-                spawnedAssets.Add(grass);
-                spawned++;
-            }
-        }
-        
-        return spawned;
-    }
-
-    /// <summary>
-    /// Get random position within placement area
-    /// </summary>
-    private Vector3 GetRandomPosition(float minDistanceFromRoad)
-    {
-        // Random X along the route
-        float x = Random.Range(placementStartX, placementEndX);
-        
-        // Random Z on either side of road (avoiding road)
-        float side = Random.value > 0.5f ? 1f : -1f;
-        float zOffset = Random.Range(minDistanceFromRoad, placementWidthZ);
-        float z = roadCenterZ + (side * zOffset);
-        
-        // Get terrain height at this position (world coordinates)
-        Vector3 worldPos = new Vector3(x, 0f, z);
-        float height = GetTerrainHeight(worldPos);
-        
-        return new Vector3(x, height, z);
-    }
-    
-    /// <summary>
-    /// Get terrain height at world position
-    /// </summary>
     private float GetTerrainHeight(Vector3 worldPosition)
     {
         if (terrain == null)
             return 0f;
         
-        // Method 1: Use raycast for most accurate height (recommended)
-        if (useRaycastForHeight)
-        {
-            RaycastHit hit;
-            Vector3 rayStart = new Vector3(worldPosition.x, 1000f, worldPosition.z);
-            
-            if (Physics.Raycast(rayStart, Vector3.down, out hit, 2000f))
-            {
-                if (showPlacementDebug)
-                {
-                    Debug.DrawLine(rayStart, hit.point, Color.green, 2f);
-                }
-                return hit.point.y;
-            }
-            else if (showPlacementDebug)
-            {
-                Debug.LogWarning($"[AssetRandomizer] Raycast missed at ({worldPosition.x:F1}, {worldPosition.z:F1})");
-            }
-        }
-        
-        // Method 2: Fallback to SampleHeight
-        // SampleHeight returns height relative to terrain base
-        // We need to add terrain's Y position to get world height
+        // Always use terrain.SampleHeight for reliable grounding.
+        // Raycasting can fail when the terrain collider hasn't rebuilt yet
+        // (e.g. when called immediately after SculptTerrainAlongPath).
+        // SampleHeight reads directly from heightmap data which is always current.
         float terrainHeight = terrain.SampleHeight(worldPosition);
-        float worldHeight = terrainHeight + terrain.transform.position.y;
-        
-        if (showPlacementDebug)
-        {
-            Debug.Log($"[AssetRandomizer] SampleHeight at ({worldPosition.x:F1}, {worldPosition.z:F1}): terrain={terrainHeight:F2}, world={worldHeight:F2}");
-        }
-        
-        return worldHeight;
+        return terrainHeight + terrain.transform.position.y;
     }
 
-    /// <summary>
-    /// Check if position is valid for placement
-    /// </summary>
-    private bool IsValidPlacement(Vector3 position, float minDistanceFromRoad)
+    private bool IsWithinTerrainBounds(Vector3 position)
     {
-        // Check distance from road
-        float distanceFromRoad = Mathf.Abs(position.z - roadCenterZ);
-        if (distanceFromRoad < minDistanceFromRoad)
-            return false;
+        if (terrain == null) return true;
         
-        // Check if within road width (double check)
-        if (distanceFromRoad < roadWidth / 2f)
-            return false;
+        Vector3 tPos = terrain.transform.position;
+        Vector3 tSize = terrain.terrainData.size;
         
-        // Check terrain slope
-        if (terrain != null)
-        {
-            Vector3 normal = terrain.terrainData.GetInterpolatedNormal(
-                (position.x - terrain.transform.position.x) / terrain.terrainData.size.x,
-                (position.z - terrain.transform.position.z) / terrain.terrainData.size.z
-            );
-            
-            float slope = Vector3.Angle(normal, Vector3.up);
-            if (slope > maxSlopeAngle)
-                return false;
-        }
-        
-        return true;
+        return position.x >= tPos.x && position.x <= tPos.x + tSize.x &&
+               position.z >= tPos.z && position.z <= tPos.z + tSize.z;
     }
 
-    /// <summary>
-    /// Align object to terrain normal
-    /// </summary>
+    private bool IsValidSlope(Vector3 position)
+    {
+        if (terrain == null) return true;
+        
+        float nx = (position.x - terrain.transform.position.x) / terrain.terrainData.size.x;
+        float nz = (position.z - terrain.transform.position.z) / terrain.terrainData.size.z;
+        
+        if (nx < 0f || nx > 1f || nz < 0f || nz > 1f) return false;
+        
+        Vector3 normal = terrain.terrainData.GetInterpolatedNormal(nx, nz);
+        float slope = Vector3.Angle(normal, Vector3.up);
+        return slope <= maxSlopeAngle;
+    }
+
     private void AlignToTerrain(Transform obj, Vector3 position)
     {
-        if (terrain == null)
-            return;
+        if (terrain == null) return;
         
-        Vector3 normal = terrain.terrainData.GetInterpolatedNormal(
-            (position.x - terrain.transform.position.x) / terrain.terrainData.size.x,
-            (position.z - terrain.transform.position.z) / terrain.terrainData.size.z
-        );
+        float nx = (position.x - terrain.transform.position.x) / terrain.terrainData.size.x;
+        float nz = (position.z - terrain.transform.position.z) / terrain.terrainData.size.z;
         
+        if (nx < 0f || nx > 1f || nz < 0f || nz > 1f) return;
+        
+        Vector3 normal = terrain.terrainData.GetInterpolatedNormal(nx, nz);
         obj.up = normal;
     }
 
-    /// <summary>
-    /// Set placement area from route
-    /// </summary>
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PUBLIC SETTERS (for compatibility)
+    // ═══════════════════════════════════════════════════════════════════════════
+
     public void SetPlacementArea(float startX, float endX)
     {
         placementStartX = startX;
         placementEndX = endX;
-        
-        if (showDebugInfo)
-            Debug.Log($"[AssetRandomizer] Placement area set: {startX}m to {endX}m");
     }
 
-    /// <summary>
-    /// Set road center Z position
-    /// </summary>
     public void SetRoadCenterZ(float z)
     {
         roadCenterZ = z;
     }
 
+    public void SetSplinePath(SplinePath path)
+    {
+        splinePath = path;
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // GIZMOS
+    // ═══════════════════════════════════════════════════════════════════════════
+
     private void OnDrawGizmos()
     {
-        if (!showGizmos || terrain == null)
-            return;
+        if (!showGizmos || terrain == null) return;
         
-        // Draw road area (red)
+        // Draw road exclusion zone
         Gizmos.color = new Color(1f, 0f, 0f, 0.3f);
-        Vector3 roadStart = new Vector3(placementStartX, 0f, roadCenterZ - roadWidth / 2f);
-        Vector3 roadEnd = new Vector3(placementEndX, 0f, roadCenterZ + roadWidth / 2f);
-        Vector3 roadSize = new Vector3(placementEndX - placementStartX, 1f, roadWidth);
         Vector3 roadCenter = new Vector3((placementStartX + placementEndX) / 2f, 0f, roadCenterZ);
+        Vector3 roadSize = new Vector3(placementEndX - placementStartX, 1f, roadWidth);
         Gizmos.DrawCube(roadCenter, roadSize);
         
-        // Draw placement area (green)
+        // Draw placement area
         Gizmos.color = new Color(0f, 1f, 0f, 0.1f);
         Vector3 placementSize = new Vector3(placementEndX - placementStartX, 1f, placementWidthZ * 2f);
         Gizmos.DrawCube(roadCenter, placementSize);

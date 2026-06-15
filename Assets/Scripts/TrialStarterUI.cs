@@ -111,6 +111,12 @@ public class TrialStarterUI : MonoBehaviour
                 participantIDInput.Select();
                 participantIDInput.ActivateInputField();
             }
+            
+            Debug.Log("[TrialStarter] Start panel shown — waiting for user to click Start");
+        }
+        else
+        {
+            Debug.LogWarning("[TrialStarter] Start panel not assigned! Please assign in Inspector.");
         }
     }
 

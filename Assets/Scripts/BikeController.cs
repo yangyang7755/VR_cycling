@@ -24,7 +24,7 @@ public class BikeController : MonoBehaviour
 
     [Header("Speed Calculation Mode")]
     [Tooltip("Use physics-based speed calculation (power + gradient) or direct speed from trainer")]
-    [SerializeField] private BikeSpeedMode speedMode = BikeSpeedMode.PhysicsBased;
+    [SerializeField] private BikeSpeedMode speedMode = BikeSpeedMode.DirectFromTrainer;
 
     [Header("Bike Physics Parameters")]
     [Tooltip("Total mass (rider + bike) in kg")]
@@ -277,10 +277,10 @@ public class BikeController : MonoBehaviour
         lastUpdateTime = Time.time;
 
         // Simulation mode: force OFF for real bike usage
-        // To test without bike, manually check "Simulation Mode" in Inspector
-        simulationMode = false;
+        // To test without bike, change this to: simulationMode = true;
+        // simulationMode = false;
         currentPower = 0f;
-        simulatedPower = 0f;
+        simulatedPower = 150f; // Default simulated power for testing
         enableResistanceControl = true;
 
         Debug.Log($"[BikeController] Initialized in {speedMode} mode");
@@ -297,6 +297,14 @@ public class BikeController : MonoBehaviour
         if (terrain == null)
         {
             Debug.LogError("BikeController: Terrain is null!");
+            return;
+        }
+
+        // If bike is locked (during cue/countdown), don't process any movement
+        if (bikeLocked)
+        {
+            currentSpeed = 0f;
+            currentPower = 0f;
             return;
         }
 
@@ -320,7 +328,8 @@ public class BikeController : MonoBehaviour
         }
         else
         {
-            // Use speed directly from trainer (already updated in UpdateFromWebSocket)
+            // Direct mode: speed is set in UpdateFromWebSocket, just update distance
+            distanceTravelled += currentSpeed * Time.deltaTime;
         }
 
         // Update bike position
@@ -400,7 +409,11 @@ public class BikeController : MonoBehaviour
     private void UpdateFromWebSocket()
     {
         if (webSocketClient == null)
-            return;
+        {
+            // Try to re-find it in case it was on a different object
+            webSocketClient = FindObjectOfType<WebSocketClient>();
+            if (webSocketClient == null) return;
+        }
 
         // Read data regardless of connection state flag
         float power = webSocketClient.GetPowerWatts();
@@ -410,22 +423,44 @@ public class BikeController : MonoBehaviour
         // Debug: log what we're receiving (every 2 seconds)
         if (Time.frameCount % 120 == 0)
         {
-            Debug.Log($"[BikeController] WebSocket data → Power:{power}W, Cadence:{cadence}rpm, Speed:{speedKmh}km/h, WS Connected:{webSocketClient.IsConnected()}");
+            Debug.Log($"[BikeController] WebSocket data → Power:{power:F0}W, Cadence:{cadence:F0}rpm, Speed:{speedKmh:F1}km/h, " +
+                      $"Connected:{webSocketClient.IsConnected()}, CurrentSpeed:{currentSpeed:F2}m/s, Dist:{distanceTravelled:F0}m");
         }
 
         // Update power and cadence
         if (power > 0)
             currentPower = power;
+        else if (cadence > 0 && speedKmh > 0)
+        {
+            // Power not reported but rider is pedaling — estimate from speed
+            // Simple estimate: P = Crr*m*g*v + 0.5*CdA*rho*v³ (flat road estimate)
+            float v = speedKmh / 3.6f;
+            float estimatedPower = (rollingResistance * totalMass * 9.81f * v) + 
+                                   (0.5f * airDensity * frontalArea * dragCoefficient * v * v * v);
+            currentPower = Mathf.Max(estimatedPower, cadence * 0.8f); // At least cadence-based estimate
+        }
         else
-            currentPower = 0f; // No power = no power (don't keep stale values)
+            currentPower = 0f;
 
         if (cadence >= 0)
             currentCadence = cadence;
 
-        // If using direct speed mode, update speed from trainer
+        // If using direct speed mode, OR if power is unavailable but speed is reported,
+        // use the trainer's speed directly for movement
         if (speedMode == BikeSpeedMode.DirectFromTrainer && speedKmh > 0)
         {
-            currentSpeed = speedKmh / 3.6f; // Convert km/h to m/s
+            currentSpeed = speedKmh / 3.6f;
+        }
+        else if (power <= 0 && speedKmh > 0.5f && cadence > 0)
+        {
+            // Fallback: trainer reports speed but not power — use reported speed
+            // but apply gradient effect (slow down on hills, speed up downhill)
+            float targetSpeed = speedKmh / 3.6f;
+            float gradientFactor = 1f - (currentSlope * 0.08f); // 5% slope → 60% of flat speed
+            gradientFactor = Mathf.Clamp(gradientFactor, 0.3f, 1.5f);
+            float adjustedSpeed = targetSpeed * gradientFactor;
+            currentSpeed = Mathf.Lerp(currentSpeed, adjustedSpeed, Time.deltaTime * 3f);
+            distanceTravelled += currentSpeed * Time.deltaTime;
         }
     }
 
@@ -440,12 +475,13 @@ public class BikeController : MonoBehaviour
 
         // Map gradient to resistance:
         // resistance = flatResistance + (gradient% × resistancePerPercent)
-        // e.g. flat=30, perPercent=5: 0%→30, 5%→55, 8%→70, 10%→80
         float resistance = flatResistance + (currentSlope * resistancePerPercent);
         int resistanceLevel = Mathf.Clamp(Mathf.RoundToInt(resistance), 0, maxResistance);
 
         webSocketClient.SetResistance(resistanceLevel);
-        Debug.Log($"[BikeController] Sending resistance: {resistanceLevel}% (slope: {currentSlope:F1}%)");
+        
+        // Log every time resistance is sent (every 0.5s based on resistanceUpdateInterval)
+        Debug.Log($"[BikeController] RESISTANCE SENT → {resistanceLevel} (slope={currentSlope:F1}%, dist={distanceTravelled:F0}m)");
     }
 
     private void UpdateSlope()
@@ -632,12 +668,9 @@ public class BikeController : MonoBehaviour
             SplinePath.SplineSample sample = splinePath.SampleAtDistance(clampedDist);
             Vector3 targetPosition = sample.position;
             
-            // Use terrain height for accurate ground placement
-            if (terrain != null)
-            {
-                float terrainHeight = terrain.SampleHeight(targetPosition);
-                targetPosition.y = terrainHeight + 0.5f;
-            }
+            // Use spline Y directly (it has the visual elevation applied)
+            // Add small offset so bike sits ON the road surface
+            targetPosition.y += 0.5f;
             
             // Smooth position
             if (smoothMovement)
@@ -893,6 +926,24 @@ public class BikeController : MonoBehaviour
         return simulationMode;
     }
 
+    public void SetSimulationMode(bool enabled)
+    {
+        simulationMode = enabled;
+        if (enabled)
+        {
+            simulatedPower = 150f;
+            currentPower = 150f;
+            this.enabled = true; // Make sure BikeController is active
+            Debug.Log("[BikeController] SIMULATION MODE enabled — 150W constant, Up/Down to adjust");
+        }
+        else
+        {
+            simulatedPower = 0f;
+            currentPower = 0f;
+            Debug.Log("[BikeController] LIVE MODE — power from real bike");
+        }
+    }
+
     public float GetCurrentPower()
     {
         return currentPower;
@@ -963,6 +1014,25 @@ public class BikeController : MonoBehaviour
         courseCompleted = false;
         distanceTravelled = 0f;
         currentSpeed = 0f;
+    }
+    
+    private bool bikeLocked = false;
+    
+    /// <summary>
+    /// Lock the bike — prevents all movement (for cue/countdown phases)
+    /// </summary>
+    public void LockBike()
+    {
+        bikeLocked = true;
+        currentSpeed = 0f;
+    }
+    
+    /// <summary>
+    /// Unlock the bike — allows movement again
+    /// </summary>
+    public void UnlockBike()
+    {
+        bikeLocked = false;
     }
     
     /// <summary>
