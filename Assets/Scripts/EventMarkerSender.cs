@@ -38,6 +38,16 @@ public class EventMarkerSender : MonoBehaviour
     
     [Tooltip("Enable UDP sending")]
     [SerializeField] private bool enableUDP = true;
+
+    [Header("BrainVision Recorder (TCP)")]
+    [Tooltip("Enable TCP markers to BrainVision Recorder")]
+    [SerializeField] private bool enableBrainVision = false;
+    
+    [Tooltip("BrainVision Recorder IP (same machine = 127.0.0.1)")]
+    [SerializeField] private string bvRecorderIP = "127.0.0.1";
+    
+    [Tooltip("BrainVision Recorder Remote Control port (default: 6700)")]
+    [SerializeField] private int bvRecorderPort = 6700;
     
     [Header("Local Logging")]
     [SerializeField] private bool logToFile = true;
@@ -55,6 +65,8 @@ public class EventMarkerSender : MonoBehaviour
     
     private UdpClient udpClient;
     private IPEndPoint endPoint;
+    private TcpClient bvTcpClient;
+    private NetworkStream bvStream;
     private string logFilePath;
     private float lastGradient = 0f;
     private bool isClimbing = false;
@@ -99,6 +111,24 @@ public class EventMarkerSender : MonoBehaviour
             {
                 Debug.LogError($"[EventMarker] UDP setup failed: {e.Message}");
                 enableUDP = false;
+            }
+        }
+
+        // Setup TCP for BrainVision Recorder
+        if (enableBrainVision)
+        {
+            try
+            {
+                bvTcpClient = new TcpClient();
+                bvTcpClient.Connect(bvRecorderIP, bvRecorderPort);
+                bvStream = bvTcpClient.GetStream();
+                Debug.Log($"[EventMarker] BrainVision Recorder connected → {bvRecorderIP}:{bvRecorderPort}");
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[EventMarker] BrainVision Recorder connection failed: {e.Message}");
+                Debug.LogWarning("[EventMarker] Make sure Remote Control is enabled in BrainVision Recorder (Configuration → Preferences → Remote Control)");
+                enableBrainVision = false;
             }
         }
         
@@ -179,6 +209,26 @@ public class EventMarkerSender : MonoBehaviour
             catch (Exception e)
             {
                 Debug.LogWarning($"[EventMarker] UDP send failed: {e.Message}");
+            }
+        }
+        
+        // Send TCP to BrainVision Recorder
+        if (enableBrainVision && bvStream != null)
+        {
+            try
+            {
+                // BrainVision Recorder expects: "MK<number>\n" for numeric markers
+                // or annotation format for text markers
+                // Use event counter as numeric marker + annotation with details
+                string bvMarker = $"MK{eventCounter}\n";
+                byte[] bvBytes = Encoding.ASCII.GetBytes(bvMarker);
+                bvStream.Write(bvBytes, 0, bvBytes.Length);
+                bvStream.Flush();
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning($"[EventMarker] BrainVision send failed: {e.Message}");
+                enableBrainVision = false; // Disable on failure
             }
         }
         

@@ -58,6 +58,10 @@ public class StartScreenUI : MonoBehaviour
     [Tooltip("Skip baseline (for testing)")]
     [SerializeField] private bool skipBaseline = false;
 
+    [Header("Mode")]
+    [Tooltip("Simulation mode — no bike needed, uses keyboard power")]
+    [SerializeField] private bool simulationMode = false;
+
     private ParticipantData currentData;
     private int lastTrialNumber = 1;
     private GameObject baselinePanel;
@@ -200,8 +204,23 @@ public class StartScreenUI : MonoBehaviour
             bikeDataPanel.SetActive(false);
         }
 
+        // Hide all HUD elements — retry for a few frames since some are created late
+        HideAllHUD();
+        StartCoroutine(DelayedHideHUD());
+
         // Pause game time
         Time.timeScale = 0f;
+    }
+
+    private System.Collections.IEnumerator DelayedHideHUD()
+    {
+        // Keep hiding for several real-time frames (works even when timeScale=0)
+        for (int i = 0; i < 5; i++)
+        {
+            yield return new WaitForSecondsRealtime(0.1f);
+            if (startPanel != null && startPanel.activeSelf)
+                HideAllHUD();
+        }
     }
 
     private void HideStartScreen()
@@ -217,11 +236,117 @@ public class StartScreenUI : MonoBehaviour
             bikeDataPanel.SetActive(true);
         }
 
+        // Show HUD elements again
+        ShowAllHUD();
+
         // Enable game components
         EnableGameComponents();
 
         // Resume game time
         Time.timeScale = 1f;
+    }
+
+    private void HideAllHUD()
+    {
+        // Hide cycling HUD (speed, power, cadence display) — all variants
+        var cyclingHUD = FindObjectOfType<ModernCyclingUI>();
+        if (cyclingHUD != null) cyclingHUD.gameObject.SetActive(false);
+
+        var bikeDataUI = FindObjectOfType<BikeDataUI>();
+        if (bikeDataUI != null) bikeDataUI.gameObject.SetActive(false);
+
+        var cyclingHUD2 = FindObjectOfType<CyclingHUD>();
+        if (cyclingHUD2 != null) cyclingHUD2.gameObject.SetActive(false);
+
+        var bikeDataDisplay = FindObjectOfType<BikeDataDisplay>();
+        if (bikeDataDisplay != null) bikeDataDisplay.gameObject.SetActive(false);
+
+        var enhancedUI = FindObjectOfType<EnhancedBikeDataUI>();
+        if (enhancedUI != null) enhancedUI.gameObject.SetActive(false);
+
+        var simpleDisplay = FindObjectOfType<SimpleDataDisplay>();
+        if (simpleDisplay != null) simpleDisplay.gameObject.SetActive(false);
+
+        // Hide progress bars
+        var elevationBar = FindObjectOfType<ElevationProgressBar>();
+        if (elevationBar != null) elevationBar.gameObject.SetActive(false);
+
+        var elevationProfile = FindObjectOfType<ElevationProfileBar>();
+        if (elevationProfile != null) elevationProfile.gameObject.SetActive(false);
+
+        var distanceBar = FindObjectOfType<DistanceProgressBar>();
+        if (distanceBar != null) distanceBar.gameObject.SetActive(false);
+
+        var continuousProgress = FindObjectOfType<ContinuousProgressUI>();
+        if (continuousProgress != null) continuousProgress.gameObject.SetActive(false);
+
+        // Hide gradient indicator
+        var gradientIndicator = FindObjectOfType<GradientIndicator>();
+        if (gradientIndicator != null) gradientIndicator.gameObject.SetActive(false);
+
+        // Hide persistent pain VAS
+        var painVAS = FindObjectOfType<PersistentPainVAS>();
+        if (painVAS != null) painVAS.gameObject.SetActive(false);
+
+        // Hide coin counter and HillClimbExperiment GUI
+        // (find any canvas with "Coin" or "HUD" in name)
+        foreach (var canvas in FindObjectsOfType<Canvas>())
+        {
+            string name = canvas.gameObject.name.ToLower();
+            if (name.Contains("hud") || name.Contains("cycling") || name.Contains("coin"))
+            {
+                canvas.gameObject.SetActive(false);
+            }
+        }
+    }
+
+    private void ShowAllHUD()
+    {
+        var cyclingHUD = FindObjectOfType<ModernCyclingUI>(true);
+        if (cyclingHUD != null) cyclingHUD.gameObject.SetActive(true);
+
+        var bikeDataUI = FindObjectOfType<BikeDataUI>(true);
+        if (bikeDataUI != null) bikeDataUI.gameObject.SetActive(true);
+
+        var cyclingHUD2 = FindObjectOfType<CyclingHUD>(true);
+        if (cyclingHUD2 != null) cyclingHUD2.gameObject.SetActive(true);
+
+        var bikeDataDisplay = FindObjectOfType<BikeDataDisplay>(true);
+        if (bikeDataDisplay != null) bikeDataDisplay.gameObject.SetActive(true);
+
+        var enhancedUI = FindObjectOfType<EnhancedBikeDataUI>(true);
+        if (enhancedUI != null) enhancedUI.gameObject.SetActive(true);
+
+        var simpleDisplay = FindObjectOfType<SimpleDataDisplay>(true);
+        if (simpleDisplay != null) simpleDisplay.gameObject.SetActive(true);
+
+        var elevationBar = FindObjectOfType<ElevationProgressBar>(true);
+        if (elevationBar != null) elevationBar.gameObject.SetActive(true);
+
+        var elevationProfile = FindObjectOfType<ElevationProfileBar>(true);
+        if (elevationProfile != null) elevationProfile.gameObject.SetActive(true);
+
+        var distanceBar = FindObjectOfType<DistanceProgressBar>(true);
+        if (distanceBar != null) distanceBar.gameObject.SetActive(true);
+
+        var continuousProgress = FindObjectOfType<ContinuousProgressUI>(true);
+        if (continuousProgress != null) continuousProgress.gameObject.SetActive(true);
+
+        var gradientIndicator = FindObjectOfType<GradientIndicator>(true);
+        if (gradientIndicator != null) gradientIndicator.gameObject.SetActive(true);
+
+        var painVAS = FindObjectOfType<PersistentPainVAS>(true);
+        if (painVAS != null) painVAS.gameObject.SetActive(true);
+
+        // Re-show any hidden canvases
+        foreach (var canvas in FindObjectsOfType<Canvas>(true))
+        {
+            string name = canvas.gameObject.name.ToLower();
+            if (name.Contains("hud") || name.Contains("cycling") || name.Contains("coin"))
+            {
+                canvas.gameObject.SetActive(true);
+            }
+        }
     }
 
     private void OnParticipantIDChanged(string value)
@@ -273,11 +398,12 @@ public class StartScreenUI : MonoBehaviour
         // Apply trial configuration based on trial number
         ApplyTrialConfiguration(currentData.trialNumber);
 
-        // Hide start screen
-        HideStartScreen();
-
         // Run baseline then start experiment
-        StartCoroutine(BaselineThenExperiment());
+        // StartScreenUI is on the panel itself, so we need a persistent runner
+        GameObject runner = new GameObject("ExperimentRunner");
+        DontDestroyOnLoad(runner);
+        CoroutineRunner cr = runner.AddComponent<CoroutineRunner>();
+        cr.StartCoroutine(BaselineThenExperiment(runner));
     }
 
     private bool ValidateInput()
@@ -377,15 +503,62 @@ public class StartScreenUI : MonoBehaviour
         ShowStartScreen();
     }
 
+    public void SetSimulationMode(bool enabled)
+    {
+        simulationMode = enabled;
+        if (enabled) skipBaseline = true; // Also skip baseline in sim mode
+    }
+
+    // Show simulation/live mode toggle on start screen
+    private void OnGUI()
+    {
+        if (startPanel == null || !startPanel.activeSelf) return;
+
+        // Mode toggle button in bottom-left corner
+        float bw = 200f, bh = 40f;
+        float x = 10f;
+        float y = Screen.height - bh - 10f;
+
+        GUIStyle style = new GUIStyle(GUI.skin.button);
+        style.fontSize = 14;
+        style.fontStyle = FontStyle.Bold;
+
+        string modeLabel = simulationMode ? "MODE: SIMULATION" : "MODE: LIVE (Bike)";
+        Color oldColor = GUI.backgroundColor;
+        GUI.backgroundColor = simulationMode ? Color.yellow : Color.green;
+
+        if (GUI.Button(new Rect(x, y, bw, bh), modeLabel, style))
+        {
+            simulationMode = !simulationMode;
+        }
+
+        GUI.backgroundColor = oldColor;
+
+        // Show info below
+        GUIStyle info = new GUIStyle(GUI.skin.label);
+        info.fontSize = 11;
+        info.normal.textColor = Color.gray;
+        string infoText = simulationMode 
+            ? "No bike needed. Use Up/Down arrows for power." 
+            : "Requires Python BLE bridge + bike connected.";
+        GUI.Label(new Rect(x, y - 20f, 400f, 20f), infoText, info);
+    }
+
     // =========================================================================
     // BASELINE EEG RECORDING PHASE
     // =========================================================================
 
-    private System.Collections.IEnumerator BaselineThenExperiment()
+    private System.Collections.IEnumerator BaselineThenExperiment(GameObject runner)
     {
-        if (!skipBaseline)
+        // Hide start screen now (safe because coroutine runs on a different object)
+        HideStartScreen();
+
+        if (!skipBaseline && !simulationMode)
         {
-            // Create baseline overlay (black screen with text)
+            // Hide ALL HUD elements during baseline
+            HideAllHUD();
+
+            // Create baseline overlay (black screen with fixation cross)
             CreateBaselinePanel();
             baselinePanel.SetActive(true);
 
@@ -398,10 +571,17 @@ public class StartScreenUI : MonoBehaviour
             float elapsed = 0f;
             while (elapsed < baselineDurationSeconds)
             {
+                // Press Escape to skip baseline
+                if (Input.GetKeyDown(KeyCode.Escape))
+                {
+                    Debug.Log("[EEG] Baseline SKIPPED by user (Escape key)");
+                    break;
+                }
+
                 float remaining = baselineDurationSeconds - elapsed;
                 int minutes = Mathf.FloorToInt(remaining / 60f);
                 int seconds = Mathf.FloorToInt(remaining % 60f);
-                baselineText.text = $"Baseline Recording\n\nPlease sit still and relax\n\n{minutes:D2}:{seconds:D2}";
+                baselineText.text = $"+\n\n\n\nBaseline Recording\nPlease sit still and relax\n\n{minutes:D2}:{seconds:D2}\n\n<size=14><color=#666>(Press Escape to skip)</color></size>";
                 elapsed += Time.unscaledDeltaTime;
                 yield return null;
             }
@@ -420,6 +600,14 @@ public class StartScreenUI : MonoBehaviour
         }
 
         // Now start the experiment
+        // Apply simulation mode to BikeController
+        BikeController bike = FindObjectOfType<BikeController>();
+        if (bike != null)
+        {
+            bike.SetSimulationMode(simulationMode);
+            Debug.Log($"[StartScreenUI] BikeController simulation mode: {simulationMode}");
+        }
+
         HillClimbExperiment hillExp = FindObjectOfType<HillClimbExperiment>();
         if (hillExp != null)
         {
@@ -440,45 +628,50 @@ public class StartScreenUI : MonoBehaviour
 
         // Trigger event
         OnTrialStarted?.Invoke(currentData);
+
+        // Cleanup runner
+        if (runner != null) Destroy(runner);
     }
+
+    // Simple helper class to run coroutines on a persistent GameObject
+    private class CoroutineRunner : MonoBehaviour { }
 
     private void CreateBaselinePanel()
     {
-        // Full-screen black panel
-        Canvas canvas = FindObjectOfType<Canvas>();
-        if (canvas == null)
-        {
-            GameObject canvasObj = new GameObject("BaselineCanvas");
-            canvas = canvasObj.AddComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            canvas.sortingOrder = 999;
-            canvasObj.AddComponent<CanvasScaler>().uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-            canvasObj.AddComponent<GraphicRaycaster>();
-        }
+        // Always create a dedicated canvas with highest sort order
+        GameObject canvasObj = new GameObject("BaselineCanvas");
+        Canvas canvas = canvasObj.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.sortingOrder = 9999; // Above everything
+        CanvasScaler scaler = canvasObj.AddComponent<CanvasScaler>();
+        scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+        scaler.referenceResolution = new Vector2(1920, 1080);
+        canvasObj.AddComponent<GraphicRaycaster>();
 
-        baselinePanel = new GameObject("BaselinePanel");
-        baselinePanel.transform.SetParent(canvas.transform, false);
-        RectTransform rt = baselinePanel.AddComponent<RectTransform>();
-        rt.anchorMin = Vector2.zero;
-        rt.anchorMax = Vector2.one;
-        rt.offsetMin = Vector2.zero;
-        rt.offsetMax = Vector2.zero;
+        baselinePanel = canvasObj; // The canvas itself IS the panel
 
-        // Black background
-        Image bg = baselinePanel.AddComponent<Image>();
+        // Black background (full screen)
+        GameObject bgObj = new GameObject("BlackBG");
+        bgObj.transform.SetParent(canvasObj.transform, false);
+        RectTransform bgRt = bgObj.AddComponent<RectTransform>();
+        bgRt.anchorMin = Vector2.zero;
+        bgRt.anchorMax = Vector2.one;
+        bgRt.offsetMin = Vector2.zero;
+        bgRt.offsetMax = Vector2.zero;
+        Image bg = bgObj.AddComponent<Image>();
         bg.color = Color.black;
 
-        // Text
+        // Text (centered)
         GameObject textObj = new GameObject("BaselineText");
-        textObj.transform.SetParent(baselinePanel.transform, false);
+        textObj.transform.SetParent(canvasObj.transform, false);
         baselineText = textObj.AddComponent<TextMeshProUGUI>();
-        baselineText.text = "Baseline Recording\n\nPlease sit still and relax\n\n05:00";
-        baselineText.fontSize = 36;
+        baselineText.text = "+\n\n\n\nBaseline Recording\nPlease sit still and relax\n\n05:00";
+        baselineText.fontSize = 42;
         baselineText.color = Color.white;
         baselineText.alignment = TextAlignmentOptions.Center;
         RectTransform trt = textObj.GetComponent<RectTransform>();
-        trt.anchorMin = Vector2.zero;
-        trt.anchorMax = Vector2.one;
+        trt.anchorMin = new Vector2(0.1f, 0.2f);
+        trt.anchorMax = new Vector2(0.9f, 0.8f);
         trt.offsetMin = Vector2.zero;
         trt.offsetMax = Vector2.zero;
     }

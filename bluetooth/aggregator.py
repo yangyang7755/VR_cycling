@@ -849,7 +849,7 @@ async def headless():
     if bike_queues:
         torque_thread = threading.Thread(
             target=torque_calculator.run_torque_estimator,
-            args=(stop_event, bike_queues[0], None),
+            args=(stop_event, bike_queues[0]),
             daemon=False
         )
 

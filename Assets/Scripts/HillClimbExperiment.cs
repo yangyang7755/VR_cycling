@@ -234,15 +234,11 @@ public class HillClimbExperiment : MonoBehaviour
     public void ResetToDefaultConditions()
     {
         conditions.Clear();
-        conditions.Add(new HillCondition { name = "Flat_0pct",     averageGradient = 0f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 0,  terrainSeed = 1000 });
-        conditions.Add(new HillCondition { name = "Steady_2pct",   averageGradient = 2f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 2,  terrainSeed = 1001 });
-        conditions.Add(new HillCondition { name = "Rolling_2pct",  averageGradient = 2f,  isRolling = true,  gradientVariation = 1.5f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 2,  terrainSeed = 1002 });
-        conditions.Add(new HillCondition { name = "Steady_5pct",   averageGradient = 5f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 4,  terrainSeed = 1003 });
-        conditions.Add(new HillCondition { name = "Rolling_5pct",  averageGradient = 5f,  isRolling = true,  gradientVariation = 1.5f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 4,  terrainSeed = 1004 });
-        conditions.Add(new HillCondition { name = "Steady_8pct",   averageGradient = 8f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 6,  terrainSeed = 1005 });
-        conditions.Add(new HillCondition { name = "Rolling_8pct",  averageGradient = 8f,  isRolling = true,  gradientVariation = 1.5f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 6,  terrainSeed = 1006 });
-        conditions.Add(new HillCondition { name = "Steady_10pct",  averageGradient = 10f, isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 8,  terrainSeed = 1007 });
-        conditions.Add(new HillCondition { name = "Rolling_10pct", averageGradient = 10f, isRolling = true,  gradientVariation = 1.5f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 8,  terrainSeed = 1008 });
+        conditions.Add(new HillCondition { name = "Flat_0pct",    averageGradient = 0f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 0, terrainSeed = 1000 });
+        conditions.Add(new HillCondition { name = "Steady_1pct",  averageGradient = 1f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 1, terrainSeed = 1001 });
+        conditions.Add(new HillCondition { name = "Steady_3pct",  averageGradient = 3f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 3, terrainSeed = 1002 });
+        conditions.Add(new HillCondition { name = "Steady_5pct",  averageGradient = 5f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1003 });
+        conditions.Add(new HillCondition { name = "Steady_8pct",  averageGradient = 8f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 8, terrainSeed = 1004 });
         Debug.Log($"[HillExperiment] Reset to {conditions.Count} default conditions");
     }
     
@@ -252,25 +248,10 @@ public class HillClimbExperiment : MonoBehaviour
         for (int i = 0; i < conditions.Count; i++)
             conditionOrder.Add(i);
         
-        // Shuffle using block number as primary seed (different block = different order)
-        // participantID ensures different participants get different orders too
-        int seed = 0;
-        foreach (char c in participantID) seed = seed * 31 + c;
-        seed = seed * 1000 + blockNumber; // Block number strongly changes the seed
+        // Sequential order — conditions run 0%, 1%, 3%, 5%, 8% in fixed sequence
+        // No randomization (each follows the other)
         
-        System.Random rng = new System.Random(seed);
-        for (int i = conditionOrder.Count - 1; i > 0; i--)
-        {
-            int j = rng.Next(i + 1);
-            int tmp = conditionOrder[i];
-            conditionOrder[i] = conditionOrder[j];
-            conditionOrder[j] = tmp;
-        }
-        
-        Debug.Log($"[HillExperiment] Seed: {seed} (PID={participantID}, Block={blockNumber})");
-        Debug.Log($"[HillExperiment] Order: {string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
-        
-        Debug.Log($"[Experiment] Order: {string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
+        Debug.Log($"[HillExperiment] Order (sequential): {string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
     }
     
     private void CreateUI()

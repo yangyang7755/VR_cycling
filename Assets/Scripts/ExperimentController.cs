@@ -118,6 +118,14 @@ public class ExperimentController : MonoBehaviour
 
     private void Awake()
     {
+        // If HillClimbExperiment exists, disable this controller to avoid conflicts
+        if (FindObjectOfType<HillClimbExperiment>() != null)
+        {
+            Debug.Log("[ExperimentController] HillClimbExperiment found — disabling ExperimentController to avoid conflicts");
+            enabled = false;
+            return;
+        }
+
         // Pre-set the first trial's gradient BEFORE CurvedRouteGenerator.Start() fires.
         // CurvedRouteGenerator waits 2 frames before generating, so this Awake() call
         // ensures trialTargetGradient is already set when GenerateRouteDelayed() runs.
