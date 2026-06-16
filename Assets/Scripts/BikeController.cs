@@ -96,7 +96,7 @@ public class BikeController : MonoBehaviour
     
     [Tooltip("Resistance at 0% gradient (flat road baseline, 0-100)")]
     [Range(0, 100)]
-    [SerializeField] private int flatResistance = 30;
+    [SerializeField] private int flatResistance = 10;
     
     [Tooltip("Resistance added per 1% gradient")]
     [Range(0f, 10f)]
@@ -104,7 +104,7 @@ public class BikeController : MonoBehaviour
     
     [Tooltip("Maximum resistance sent to trainer")]
     [Range(0, 100)]
-    [SerializeField] private int maxResistance = 100;
+    [SerializeField] private int maxResistance = 80;
 
     private float lastResistanceUpdateTime = 0f;
 
@@ -308,6 +308,14 @@ public class BikeController : MonoBehaviour
             return;
         }
 
+        // Course already completed — hold position, zero speed, stop everything
+        if (courseCompleted)
+        {
+            currentSpeed = 0f;
+            currentPower = 0f;
+            return;
+        }
+
         // Handle simulation mode input or get real-time data from WebSocket
         if (simulationMode)
         {
@@ -332,20 +340,18 @@ public class BikeController : MonoBehaviour
             distanceTravelled += currentSpeed * Time.deltaTime;
         }
 
+        // Check course boundary — hard stop, no slowdown zone (before position update)
+        if (stopAtCourseEnd && maxCourseDistance > 0f && distanceTravelled >= maxCourseDistance)
+        {
+            distanceTravelled = maxCourseDistance; // clamp exactly
+            currentSpeed = 0f;
+            courseCompleted = true;
+            Debug.Log($"[BikeController] Course complete at {distanceTravelled:F0}m");
+            NotifyCourseComplete();
+        }
+
         // Update bike position
         UpdateBikePosition();
-
-        // Check course boundary — hard stop, no slowdown zone
-        if (stopAtCourseEnd && maxCourseDistance > 0f && !courseCompleted)
-        {
-            if (distanceTravelled >= maxCourseDistance)
-            {
-                distanceTravelled = maxCourseDistance; // clamp exactly
-                courseCompleted = true;
-                currentSpeed = 0f;
-                Debug.Log($"[BikeController] Course complete at {distanceTravelled:F0}m");
-            }
-        }
 
         // Send resistance control to trainer based on terrain slope (only if not in simulation mode)
         if (!simulationMode && enableResistanceControl && Time.time - lastResistanceUpdateTime > resistanceUpdateInterval)
@@ -507,31 +513,19 @@ public class BikeController : MonoBehaviour
                 return;
             }
             
-            // Fallback: sample spline positions, clamped within spline length
+            // Fallback: sample spline positions directly — use spline Y (authoritative)
             float splineLen = splinePath.GetTotalLength();
             float dist  = Mathf.Clamp(distanceTravelled,       0f, splineLen - 6f);
             float dist2 = Mathf.Clamp(distanceTravelled + 5f,  0f, splineLen);
             SplinePath.SplineSample here  = splinePath.SampleAtDistance(dist);
             SplinePath.SplineSample ahead = splinePath.SampleAtDistance(dist2);
-            
-            if (terrain != null)
-            {
-                float hHere  = terrain.SampleHeight(here.position);
-                float hAhead = terrain.SampleHeight(ahead.position);
-                float rise = hAhead - hHere;
-                float run  = Vector3.Distance(
-                    new Vector3(here.position.x,  0, here.position.z),
-                    new Vector3(ahead.position.x, 0, ahead.position.z));
-                if (run > 0.1f)
-                    currentSlope = Mathf.Clamp((rise / run) * 100f, -15f, 15f);
-            }
-            else
-            {
-                float rise = ahead.position.y - here.position.y;
-                float run  = Vector3.Distance(here.position, ahead.position);
-                if (run > 0.1f)
-                    currentSlope = Mathf.Clamp((rise / run) * 100f, -15f, 15f);
-            }
+
+            float rise = ahead.position.y - here.position.y;
+            float run  = Vector3.Distance(
+                new Vector3(here.position.x,  0, here.position.z),
+                new Vector3(ahead.position.x, 0, ahead.position.z));
+            if (run > 0.1f)
+                currentSlope = Mathf.Clamp((rise / run) * 100f, -15f, 15f);
             return;
         }
 
@@ -668,9 +662,9 @@ public class BikeController : MonoBehaviour
             SplinePath.SplineSample sample = splinePath.SampleAtDistance(clampedDist);
             Vector3 targetPosition = sample.position;
             
-            // Use spline Y directly (it has the visual elevation applied)
-            // Add small offset so bike sits ON the road surface
-            targetPosition.y += 0.5f;
+            // Use spline Y directly — it carries the visual elevation profile and matches
+            // the road mesh exactly. terrain.SampleHeight may lag one frame after sculpting.
+            targetPosition.y = sample.position.y + 0.5f;
             
             // Smooth position
             if (smoothMovement)
@@ -683,21 +677,11 @@ public class BikeController : MonoBehaviour
                 PrefabSafetyHelper.SafeSetPosition(bikeObject, targetPosition);
             }
             
-            // Orient bike along spline tangent
+            // Orient bike along spline tangent — tilt forward vector with spline elevation
             stableForwardDirection = sample.forward;
             if (stableForwardDirection.sqrMagnitude > 0.01f)
             {
-                // Project forward onto terrain slope for realistic tilt
-                Vector3 fwd = stableForwardDirection;
-                if (terrain != null)
-                {
-                    float hAhead = terrain.SampleHeight(targetPosition + fwd * 2f);
-                    float hHere = terrain.SampleHeight(targetPosition);
-                    fwd.y = (hAhead - hHere) / 2f;
-                    fwd.Normalize();
-                }
-                
-                Quaternion targetRotation = Quaternion.LookRotation(fwd, Vector3.up);
+                Quaternion targetRotation = Quaternion.LookRotation(sample.forward, Vector3.up);
                 Quaternion newRotation = Quaternion.Slerp(
                     bikeObject.transform.rotation,
                     targetRotation,
@@ -711,11 +695,7 @@ public class BikeController : MonoBehaviour
             // Snap to spline position when stopped
             float clampedDist = Mathf.Clamp(distanceTravelled, 0f, splinePath.GetTotalLength());
             SplinePath.SplineSample sample = splinePath.SampleAtDistance(clampedDist);
-            Vector3 targetPos = sample.position;
-            if (terrain != null)
-            {
-                targetPos.y = terrain.SampleHeight(targetPos) + 0.5f;
-            }
+            Vector3 targetPos = new Vector3(sample.position.x, sample.position.y + 0.5f, sample.position.z);
             
             if (Vector3.Distance(currentPos, targetPos) > 1f)
             {
@@ -1041,5 +1021,20 @@ public class BikeController : MonoBehaviour
     public bool IsCourseCompleted()
     {
         return courseCompleted;
+    }
+    
+    /// <summary>
+    /// Called once when the course distance is reached.
+    /// Notifies the data logger and any active experiment manager to stop recording.
+    /// </summary>
+    private void NotifyCourseComplete()
+    {
+        // Stop data logger if one is active
+        UnityDataLogger logger = FindObjectOfType<UnityDataLogger>();
+        if (logger != null && logger.IsLogging())
+        {
+            logger.StopLogging();
+            Debug.Log("[BikeController] Course complete — data logging stopped");
+        }
     }
 }

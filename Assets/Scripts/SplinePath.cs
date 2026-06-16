@@ -81,7 +81,12 @@ public class SplinePath : MonoBehaviour
                 Vector3 fwd = (pos - prevPos).normalized;
                 if (fwd.sqrMagnitude < 0.001f) fwd = Vector3.forward;
                 
-                Vector3 right = Vector3.Cross(Vector3.up, fwd).normalized;
+                // Project forward onto XZ plane for the right vector so road edges
+                // stay horizontal even on steep hills (prevents edge points sinking into terrain)
+                Vector3 fwdFlat = new Vector3(fwd.x, 0f, fwd.z);
+                if (fwdFlat.sqrMagnitude < 0.001f) fwdFlat = Vector3.forward;
+                fwdFlat.Normalize();
+                Vector3 right = Vector3.Cross(Vector3.up, fwdFlat).normalized;
                 if (right.sqrMagnitude < 0.001f) right = Vector3.right;
                 
                 lookupTable.Add(new SplineSample

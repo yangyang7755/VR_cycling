@@ -1,0 +1,17 @@
+# Python packages required for the PAIN_LAB bluetooth system
+# Install with: pip install -r requirements.txt
+
+# Bluetooth Low Energy
+bleak>=0.21.0
+
+# Bike cycling services (FTMS, CPS)
+pycycling>=0.4.0
+
+# WebSocket server for Unity communication
+websockets>=12.0
+
+# Data processing
+numpy>=1.24.0
+
+# Excel/data export (optional)
+openpyxl>=3.1.0

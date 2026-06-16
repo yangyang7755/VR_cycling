@@ -37,6 +37,9 @@ bluetooth/**/__pycache__/
 # Data (large files - don't commit participant data)
 data/
 
+# Zip archives (don't commit)
+*.zip
+
 # Cursor/Kiro
 .cursor/
 .kiro/
