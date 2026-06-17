@@ -4,6 +4,7 @@ using TMPro;
 using System.Collections.Generic;
 using System.Linq;
 
+
 /// <summary>
 /// Main experiment controller for the hill climb effort-based decision-making study.
 /// 
@@ -50,7 +51,9 @@ public class HillClimbExperiment : MonoBehaviour
     [SerializeField] private List<HillCondition> conditions = new List<HillCondition>();
     private List<int> conditionOrder = new List<int>();
     private int currentConditionIndex = 0;
-    
+    // Insert MC Code for Agent Bridge
+    [SerializeField] private MonoBehaviour mcpAdapter;
+
     // State machine
     private enum Phase { Idle, HillCue, Countdown, HillClimb, Quitting, Completed, Abandoned, RewardQuestion, RewardRating, BlockEnd }
     private Phase currentPhase = Phase.Idle;
@@ -151,6 +154,13 @@ public class HillClimbExperiment : MonoBehaviour
     
     private void Start()
     {
+        // Insert MC Code for Agent Bridge
+        //mcpAdapter.Initialize(Application.dataPath + "/AgentBridge/");
+        //mcpAdapter.Connect();
+
+        FindMcpAdapter();
+        Debug.Log($"[MC Code for Agent Bridge] MCP Adapter: {mcpAdapter}");
+
         if (routeGenerator == null) routeGenerator = FindObjectOfType<CurvedRouteGenerator>();
         if (bikeController == null) bikeController = FindObjectOfType<BikeController>();
         if (rewardVAS == null) rewardVAS = FindObjectOfType<VASScale>();
@@ -223,7 +233,69 @@ public class HillClimbExperiment : MonoBehaviour
             }
         }
     }
-    
+    // Insert MC Code for Agent Bridge
+    private MonoBehaviour FindMcpAdapter()
+    {
+        if (mcpAdapter) return mcpAdapter;
+
+        foreach (var mb in FindObjectsOfType<MonoBehaviour>())
+        {
+            if (mb.GetType().Name == "VRCyclingMcpAdapter")
+            {
+                mcpAdapter = mb;
+                break;
+            }
+        }
+
+        return mcpAdapter;
+    }
+
+    private void PublishHillConditionToMcp(HillCondition condition)
+    {
+        if (condition == null) return;
+
+        var adapter = FindMcpAdapter();
+        if (!adapter)
+        {
+            Debug.LogWarning("[MC Code for Agent Bridge] VRCyclingMcpAdapter not found.");
+            return;
+        }
+
+        var type = adapter.GetType();
+        type.GetField("slopeGradePct")?.SetValue(adapter, condition.averageGradient);
+        type.GetField("terrain")?.SetValue(adapter, condition.name);
+        type.GetField("terrainMode")?.SetValue(adapter, condition.isRolling ? "rolling" : "steady");
+        type.GetField("difficultyLevel")?.SetValue(adapter, GradientToDifficulty(condition.averageGradient));
+
+        Debug.Log($"[MC Code for Agent Bridge] MCP slope={condition.averageGradient}% terrain={condition.name}");
+    }
+
+    private void PublishFlatRecoveryToMcp(string reason)
+    {
+        var adapter = FindMcpAdapter();
+        if (!adapter)
+        {
+            Debug.LogWarning($"[MC Code for Agent Bridge] Cannot reset MCP to flat ({reason}); VRCyclingMcpAdapter not found.");
+            return;
+        }
+
+        var type = adapter.GetType();
+        type.GetField("slopeGradePct")?.SetValue(adapter, 0f);
+        type.GetField("terrain")?.SetValue(adapter, reason);
+        type.GetField("terrainMode")?.SetValue(adapter, "flat");
+        type.GetField("difficultyLevel")?.SetValue(adapter, 1);
+
+        Debug.Log($"[MC Code for Agent Bridge] MCP reset to flat: {reason}");
+    }
+
+    private int GradientToDifficulty(float gradient)
+    {
+        if (gradient >= 8f) return 5;
+        if (gradient >= 5f) return 4;
+        if (gradient >= 3f) return 3;
+        if (gradient >= 1f) return 2;
+        return 1;
+    }
     private void CreateConditions()
     {
         if (conditions.Count > 0) return;
@@ -234,11 +306,11 @@ public class HillClimbExperiment : MonoBehaviour
     public void ResetToDefaultConditions()
     {
         conditions.Clear();
-        conditions.Add(new HillCondition { name = "Flat_0pct",    averageGradient = 0f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 0, terrainSeed = 1000 });
-        conditions.Add(new HillCondition { name = "Steady_1pct",  averageGradient = 1f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 1, terrainSeed = 1001 });
-        conditions.Add(new HillCondition { name = "Steady_3pct",  averageGradient = 3f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 3, terrainSeed = 1002 });
+        conditions.Add(new HillCondition { name = "Flat_0pct",    averageGradient = 0f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1000 });
+        conditions.Add(new HillCondition { name = "Steady_1pct",  averageGradient = 1f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1001 });
+        conditions.Add(new HillCondition { name = "Steady_3pct",  averageGradient = 3f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1002 });
         conditions.Add(new HillCondition { name = "Steady_5pct",  averageGradient = 5f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1003 });
-        conditions.Add(new HillCondition { name = "Steady_8pct",  averageGradient = 8f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 8, terrainSeed = 1004 });
+        conditions.Add(new HillCondition { name = "Steady_8pct",  averageGradient = 8f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1004 });
         Debug.Log($"[HillExperiment] Reset to {conditions.Count} default conditions");
     }
     
@@ -247,11 +319,29 @@ public class HillClimbExperiment : MonoBehaviour
         conditionOrder.Clear();
         for (int i = 0; i < conditions.Count; i++)
             conditionOrder.Add(i);
-        
-        // Sequential order — conditions run 0%, 1%, 3%, 5%, 8% in fixed sequence
-        // No randomization (each follows the other)
-        
-        Debug.Log($"[HillExperiment] Order (sequential): {string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
+
+        // Randomize using participant ID + block number as seed.
+        // Same participant in a new block (different blockNumber) gets a different order.
+        // Seed is deterministic: re-running the same pid + block always reproduces the same order.
+        int participantNum = 0;
+        string numStr = System.Text.RegularExpressions.Regex.Replace(participantID, "[^0-9]", "");
+        if (!string.IsNullOrEmpty(numStr))
+            int.TryParse(numStr, out participantNum);
+
+        int seed = participantNum * 1000 + blockNumber;
+        System.Random rng = new System.Random(seed);
+
+        // Fisher-Yates shuffle
+        for (int i = conditionOrder.Count - 1; i > 0; i--)
+        {
+            int j = rng.Next(i + 1);
+            int temp = conditionOrder[i];
+            conditionOrder[i] = conditionOrder[j];
+            conditionOrder[j] = temp;
+        }
+
+        Debug.Log($"[HillExperiment] Condition order (seed={seed}, pid={participantID}, block={blockNumber}): " +
+                  $"{string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
     }
     
     private void CreateUI()
@@ -357,15 +447,15 @@ public class HillClimbExperiment : MonoBehaviour
         if (EventMarkerSender.Instance != null)
             EventMarkerSender.Instance.SendEvent("BLOCK_START", $"participant={participantID},block={blockNumber},group={group}");
         
+        PublishFlatRecoveryToMcp("block_start");
         StartNextCondition();
     }
     
     private void StartNextCondition()
     {
-        finishingCondition = false; // Reset guard for next condition
-        
         if (currentConditionIndex >= conditionOrder.Count)
         {
+            finishingCondition = false;
             EndBlock();
             return;
         }
@@ -395,6 +485,10 @@ public class HillClimbExperiment : MonoBehaviour
             float variation = cond.isRolling ? cond.gradientVariation : cond.steadyNoise;
             routeGenerator.SetTrialGradient(cond.averageGradient, variation, cond.isRolling, cond.flatApproachMeters);
             routeGenerator.GenerateRoute();
+
+            // Insert MC Code for Agent Bridge
+            PublishHillConditionToMcp(cond);
+            Debug.Log($"[MC Code for Agent Bridge] Published condition to MCP: {cond.name}");
         }
 
         // Wait for route generation to complete
@@ -414,6 +508,9 @@ public class HillClimbExperiment : MonoBehaviour
         noSpeedTimer = 0f;
         phaseStartTime = Time.time;
         phaseStartDistance = bikeController != null ? bikeController.GetDistance() : 0f;
+
+        // Reset the guard now — we're about to enter a new phase so FinishCondition can work again
+        finishingCondition = false;
 
         SetPhase(Phase.HillCue);
 
@@ -462,11 +559,19 @@ public class HillClimbExperiment : MonoBehaviour
             case Phase.Completed:
                 if (profileBar != null) profileBar.Hide();
                 ShowCompletion(true);
+                
+                // Insert MC Code for Agent Bridge
+                PublishFlatRecoveryToMcp("condition_completed");
+                
                 break;
                 
             case Phase.Abandoned:
                 if (profileBar != null) profileBar.Hide();
                 ShowCompletion(false);
+                
+                // Insert MC Code for Agent Bridge
+                PublishFlatRecoveryToMcp("condition_abandoned");
+                
                 break;
             
             case Phase.RewardQuestion:
@@ -477,8 +582,10 @@ public class HillClimbExperiment : MonoBehaviour
             case Phase.RewardRating:
                 if (profileBar != null) profileBar.Hide();
                 rewardRatingConfirmed = false;
-                rewardResponseCountAtStart = rewardVAS != null ? rewardVAS.GetResponseCount() : 0;
                 ShowRewardRating();
+                // Capture response count AFTER triggering the VAS — this way we only
+                // detect genuinely new submissions, not leftover counts from prior conditions
+                rewardResponseCountAtStart = rewardVAS != null ? rewardVAS.GetResponseCount() : 0;
                 break;
         }
     }
@@ -604,14 +711,24 @@ public class HillClimbExperiment : MonoBehaviour
                 {
                     FinishCondition();
                 }
-                else if (rewardVAS != null && rewardVAS.GetResponseCount() > rewardResponseCountAtStart)
+                else if (rewardVAS == null)
+                {
+                    // No VAS system — auto-advance after 3 seconds (not instant)
+                    if (Time.time - phaseStartTime > 3f)
+                    {
+                        Debug.Log("[HillExperiment] No reward VAS — auto-advancing after 3s");
+                        FinishCondition();
+                    }
+                }
+                else if (Time.time - phaseStartTime > 0.5f && rewardVAS.GetResponseCount() > rewardResponseCountAtStart)
                 {
                     // Participant submitted a rating — wait 2s then advance
+                    // (0.5s grace period prevents detecting stale responses from prior condition)
                     if (!rewardRatingConfirmed)
                     {
                         rewardRatingConfirmed = true;
                         rewardConfirmTime = Time.time;
-                        Debug.Log($"[HillExperiment] Reward rating submitted (count: {rewardVAS.GetResponseCount()})");
+                        Debug.Log($"[HillExperiment] Reward rating submitted (count: {rewardVAS.GetResponseCount()}, expected > {rewardResponseCountAtStart})");
                     }
                     if (Time.time - rewardConfirmTime > 2f)
                     {
@@ -638,11 +755,11 @@ public class HillClimbExperiment : MonoBehaviour
         {
             if (coin != null && coin.activeSelf)
             {
-                // Spin around Y axis
-                coin.transform.Rotate(0f, 180f * Time.deltaTime, 0f, Space.World);
-                // Bob up and down
+                // Spin around local Y axis (the thin edge of the disc spins like a real coin)
+                coin.transform.Rotate(0f, 200f * Time.deltaTime, 0f, Space.Self);
+                // Bob up and down gently
                 Vector3 pos = coin.transform.position;
-                pos.y += Mathf.Sin(Time.time * 3f + coin.GetInstanceID()) * 0.005f;
+                pos.y += Mathf.Sin(Time.time * 2.5f + coin.GetInstanceID()) * 0.003f;
                 coin.transform.position = pos;
             }
         }
@@ -722,8 +839,7 @@ public class HillClimbExperiment : MonoBehaviour
 
         if (group == ExperimentGroup.Reward)
         {
-            int coins = cond.coinReward > 0 ? cond.coinReward : 5;
-            cueMsg += $"\n\n<size=26><color=#FFD700>🪙 × {coins}</color></size>";
+            cueMsg += $"\n\n<size=26><color=#FFD700>🪙 × 5</color></size>";
         }
 
         cueText.text = cueMsg;
@@ -905,6 +1021,9 @@ public class HillClimbExperiment : MonoBehaviour
     {
         int condIdx = conditionOrder[currentConditionIndex];
         HillCondition cond = conditions[condIdx];
+        // Insert MC Code for Agent Bridge
+        PublishHillConditionToMcp(cond);
+        Debug.Log($"[MC Code for Agent Bridge] MCP hill climb started:: {cond.name}");
 
         hillLength = cond.hillLengthMeters;
         flatApproachLength = cond.flatApproachMeters;
@@ -1089,9 +1208,15 @@ public class HillClimbExperiment : MonoBehaviour
         
         // Quit detection: 5s no pedaling triggers a 10s countdown, then abandon
         // SKIP entirely in simulation mode
+        // SKIP during flat approach (rider may not have started pedalling yet)
+        bool pastFlatApproach = hillDist > flatApproachLength;
         if (simulationModeActive)
         {
             noSpeedTimer = 0f; // Never accumulate in sim mode
+        }
+        else if (!pastFlatApproach)
+        {
+            noSpeedTimer = 0f; // Don't penalise during flat lead-in
         }
         else if (speed < quitSpeedThreshold)
         {
@@ -1256,6 +1381,10 @@ public class HillClimbExperiment : MonoBehaviour
         if (finishingCondition) return;
         finishingCondition = true;
         
+        // CRITICAL: Set phase to Idle immediately so the Update loop doesn't
+        // re-trigger reward/completion logic during the coroutine wait frames
+        currentPhase = Phase.Idle;
+        
         int condIdx = conditionOrder[currentConditionIndex];
         HillCondition cond = conditions[condIdx];
         
@@ -1295,6 +1424,9 @@ public class HillClimbExperiment : MonoBehaviour
         foreach (var s in activeSignObjects) if (s != null) Destroy(s);
         activeSignObjects.Clear();
         
+        // Insert MC Code for Agent Bridge
+        PublishFlatRecoveryToMcp("condition_end");
+
         // Next condition
         currentConditionIndex++;
         StartNextCondition();
@@ -1324,11 +1456,10 @@ public class HillClimbExperiment : MonoBehaviour
         
         for (int i = 0; i < count; i++)
         {
-            // Create a flat coin (cylinder squashed flat, rotated to face camera)
+            // Create a coin (cylinder squashed flat, standing upright facing the cyclist)
             GameObject coin = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
             coin.name = $"Coin_{i}";
-            coin.transform.localScale = new Vector3(1.2f, 0.08f, 1.2f); // Flat disc
-            coin.transform.rotation = Quaternion.Euler(90f, 0f, 0f); // Face forward (vertical disc)
+            coin.transform.localScale = new Vector3(1.5f, 0.1f, 1.5f); // Flat disc, larger for visibility
             coin.transform.position = new Vector3(0f, -100f, 0f); // Hidden until positioned
             
             // Gold material — use the same shader as other objects in the scene
@@ -1380,18 +1511,20 @@ public class HillClimbExperiment : MonoBehaviour
             {
                 float clampedDist = Mathf.Clamp(totalDist, 0f, spline.GetTotalLength() - 1f);
                 SplinePath.SplineSample s = spline.SampleAtDistance(clampedDist);
-                Vector3 pos = s.position;
-                // Place coin just above the road surface (use terrain height which matches the road)
-                Terrain t = FindObjectOfType<Terrain>();
-                if (t != null)
-                {
-                    pos.y = t.SampleHeight(pos) + 0.8f;
-                }
-                else
-                {
-                    pos.y += 0.8f;
-                }
+
+                // Use spline Y directly — same source as the road mesh and bike,
+                // so coins sit exactly on the road surface regardless of terrain timing.
+                // Position coin 1.2m above road so it floats at rider eye level
+                Vector3 pos = new Vector3(s.position.x, s.position.y + 1.2f, s.position.z);
                 coin.transform.position = pos;
+
+                // Orient the coin perpendicular to the road (face toward the approaching cyclist).
+                // The flat face of a cylinder is along its local Y axis.
+                // We want the flat face facing the rider (back along the road = -forward).
+                // Rotate so the cylinder's Y axis points along the road direction (disc face toward rider).
+                Vector3 fwd = s.forward;
+                if (fwd.sqrMagnitude < 0.01f) fwd = Vector3.forward;
+                coin.transform.rotation = Quaternion.LookRotation(Vector3.up, fwd);
             }
             else
             {
@@ -1516,7 +1649,56 @@ public class HillClimbExperiment : MonoBehaviour
     }
     
     // === BLOCK END ===
-    
+
+    /// <summary>
+    /// Appends one row to the shared participant_earnings.csv file.
+    /// File lives in Application.persistentDataPath so it survives across sessions.
+    /// Each coin = £0.10. Row is appended so all participants / blocks accumulate in one place.
+    /// Columns: timestamp, participant_id, block, group, conditions_completed,
+    ///          coins_collected, coins_possible, earnings_gbp
+    /// </summary>
+    private void WriteEarningsCSV()
+    {
+        const float poundPerCoin = 0.10f;
+        int conditionsCompleted = results.Count(r => r.completed);
+        int coinsPossible       = conditionsCompleted * 5; // 5 coins per completed condition
+        float earningsGbp       = totalCoinsCollected * poundPerCoin;
+
+        string csvPath = System.IO.Path.Combine(
+            Application.persistentDataPath, "participant_earnings.csv");
+
+        bool fileExists = System.IO.File.Exists(csvPath);
+
+        try
+        {
+            using (var w = new System.IO.StreamWriter(csvPath, append: true))
+            {
+                // Write header only when creating the file for the first time
+                if (!fileExists)
+                    w.WriteLine("timestamp,participant_id,block,group," +
+                                "conditions_completed,coins_collected,coins_possible,earnings_gbp");
+
+                w.WriteLine(
+                    $"{System.DateTime.Now:yyyy-MM-dd HH:mm:ss}," +
+                    $"{participantID}," +
+                    $"{blockNumber}," +
+                    $"{group}," +
+                    $"{conditionsCompleted}," +
+                    $"{totalCoinsCollected}," +
+                    $"{coinsPossible}," +
+                    $"{earningsGbp:F2}");
+            }
+
+            Debug.Log($"[HillExperiment] Earnings written → {csvPath}");
+            Debug.Log($"[HillExperiment] {participantID} earned £{earningsGbp:F2} " +
+                      $"({totalCoinsCollected}/{coinsPossible} coins)");
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[HillExperiment] Failed to write earnings CSV: {e.Message}");
+        }
+    }
+
     private void EndBlock()
     {
         experimentRunning = false;
@@ -1542,12 +1724,19 @@ public class HillClimbExperiment : MonoBehaviour
         
         if (EventMarkerSender.Instance != null)
             EventMarkerSender.Instance.SendEvent("BLOCK_END", $"block={blockNumber},completed={results.Count(r => r.completed)},coins={totalCoinsCollected}");
+
+        PublishFlatRecoveryToMcp("block_end");
+
+        // Write participant earnings to the persistent CSV tracker
+        WriteEarningsCSV();
         
-        // Show start screen for next block
+        // Return to participant ID entry screen for next participant/block
         StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true); // include inactive
         if (startScreen != null)
         {
             startScreen.gameObject.SetActive(true);
+            startScreen.ShowStartScreenManual();
+            Debug.Log("[HillExperiment] Returned to participant entry screen");
         }
         else
         {
