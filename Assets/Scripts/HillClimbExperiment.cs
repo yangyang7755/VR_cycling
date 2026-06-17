@@ -4,6 +4,7 @@ using TMPro;
 using System.Collections.Generic;
 using System.Linq;
 
+
 /// <summary>
 /// Main experiment controller for the hill climb effort-based decision-making study.
 /// 
@@ -50,7 +51,9 @@ public class HillClimbExperiment : MonoBehaviour
     [SerializeField] private List<HillCondition> conditions = new List<HillCondition>();
     private List<int> conditionOrder = new List<int>();
     private int currentConditionIndex = 0;
-    
+    // Insert MC Code for Agent Bridge
+    [SerializeField] private MonoBehaviour mcpAdapter;
+
     // State machine
     private enum Phase { Idle, HillCue, Countdown, HillClimb, Quitting, Completed, Abandoned, PostClimbPain, RewardQuestion, RewardRating, BlockEnd }
     private Phase currentPhase = Phase.Idle;
@@ -153,6 +156,12 @@ public class HillClimbExperiment : MonoBehaviour
     {
         // Ensure game runs even when Unity Editor loses focus
         Application.runInBackground = true;
+        // Insert MC Code for Agent Bridge
+        //mcpAdapter.Initialize(Application.dataPath + "/AgentBridge/");
+        //mcpAdapter.Connect();
+
+        FindMcpAdapter();
+        Debug.Log($"[MC Code for Agent Bridge] MCP Adapter: {mcpAdapter}");
 
         if (routeGenerator == null) routeGenerator = FindObjectOfType<CurvedRouteGenerator>();
         if (bikeController == null) bikeController = FindObjectOfType<BikeController>();
@@ -226,7 +235,69 @@ public class HillClimbExperiment : MonoBehaviour
             }
         }
     }
-    
+    // Insert MC Code for Agent Bridge
+    private MonoBehaviour FindMcpAdapter()
+    {
+        if (mcpAdapter) return mcpAdapter;
+
+        foreach (var mb in FindObjectsOfType<MonoBehaviour>())
+        {
+            if (mb.GetType().Name == "VRCyclingMcpAdapter")
+            {
+                mcpAdapter = mb;
+                break;
+            }
+        }
+
+        return mcpAdapter;
+    }
+
+    private void PublishHillConditionToMcp(HillCondition condition)
+    {
+        if (condition == null) return;
+
+        var adapter = FindMcpAdapter();
+        if (!adapter)
+        {
+            Debug.LogWarning("[MC Code for Agent Bridge] VRCyclingMcpAdapter not found.");
+            return;
+        }
+
+        var type = adapter.GetType();
+        type.GetField("slopeGradePct")?.SetValue(adapter, condition.averageGradient);
+        type.GetField("terrain")?.SetValue(adapter, condition.name);
+        type.GetField("terrainMode")?.SetValue(adapter, condition.isRolling ? "rolling" : "steady");
+        type.GetField("difficultyLevel")?.SetValue(adapter, GradientToDifficulty(condition.averageGradient));
+
+        Debug.Log($"[MC Code for Agent Bridge] MCP slope={condition.averageGradient}% terrain={condition.name}");
+    }
+
+    private void PublishFlatRecoveryToMcp(string reason)
+    {
+        var adapter = FindMcpAdapter();
+        if (!adapter)
+        {
+            Debug.LogWarning($"[MC Code for Agent Bridge] Cannot reset MCP to flat ({reason}); VRCyclingMcpAdapter not found.");
+            return;
+        }
+
+        var type = adapter.GetType();
+        type.GetField("slopeGradePct")?.SetValue(adapter, 0f);
+        type.GetField("terrain")?.SetValue(adapter, reason);
+        type.GetField("terrainMode")?.SetValue(adapter, "flat");
+        type.GetField("difficultyLevel")?.SetValue(adapter, 1);
+
+        Debug.Log($"[MC Code for Agent Bridge] MCP reset to flat: {reason}");
+    }
+
+    private int GradientToDifficulty(float gradient)
+    {
+        if (gradient >= 8f) return 5;
+        if (gradient >= 5f) return 4;
+        if (gradient >= 3f) return 3;
+        if (gradient >= 1f) return 2;
+        return 1;
+    }
     private void CreateConditions()
     {
         if (conditions.Count > 0) return;
@@ -512,6 +583,10 @@ public class HillClimbExperiment : MonoBehaviour
             float variation = cond.isRolling ? cond.gradientVariation : cond.steadyNoise;
             routeGenerator.SetTrialGradient(cond.averageGradient, variation, cond.isRolling, cond.flatApproachMeters);
             routeGenerator.GenerateRoute();
+
+            // Insert MC Code for Agent Bridge
+            PublishHillConditionToMcp(cond);
+            Debug.Log($"[MC Code for Agent Bridge] Published condition to MCP: {cond.name}");
         }
 
         // Wait for route generation to complete
@@ -601,11 +676,19 @@ public class HillClimbExperiment : MonoBehaviour
             case Phase.Completed:
                 if (profileBar != null) profileBar.Hide();
                 ShowCompletion(true);
+                
+                // Insert MC Code for Agent Bridge
+                PublishFlatRecoveryToMcp("condition_completed");
+                
                 break;
                 
             case Phase.Abandoned:
                 if (profileBar != null) profileBar.Hide();
                 ShowCompletion(false);
+                
+                // Insert MC Code for Agent Bridge
+                PublishFlatRecoveryToMcp("condition_abandoned");
+                
                 break;
             
             case Phase.RewardQuestion:
@@ -1012,6 +1095,9 @@ public class HillClimbExperiment : MonoBehaviour
     {
         int condIdx = conditionOrder[currentConditionIndex];
         HillCondition cond = conditions[condIdx];
+        // Insert MC Code for Agent Bridge
+        PublishHillConditionToMcp(cond);
+        Debug.Log($"[MC Code for Agent Bridge] MCP hill climb started:: {cond.name}");
 
         hillLength = cond.hillLengthMeters;
         flatApproachLength = cond.flatApproachMeters;
@@ -1822,6 +1908,9 @@ public class HillClimbExperiment : MonoBehaviour
         foreach (var s in activeSignObjects) if (s != null) Destroy(s);
         activeSignObjects.Clear();
         
+        // Insert MC Code for Agent Bridge
+        PublishFlatRecoveryToMcp("condition_end");
+
         // Next condition
         currentConditionIndex++;
         StartNextCondition();
@@ -2365,6 +2454,13 @@ public class HillClimbExperiment : MonoBehaviour
     {
         // Try to show the start screen UI
         StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true);
+        PublishFlatRecoveryToMcp("block_end");
+
+        // Write participant earnings to the persistent CSV tracker
+        WriteEarningsCSV();
+        
+        // Return to participant ID entry screen for next participant/block
+        StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true); // include inactive
         if (startScreen != null)
         {
             // Activate the entire chain
