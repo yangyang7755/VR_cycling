@@ -88,6 +88,18 @@ public class BikeController : MonoBehaviour
     [Tooltip("WebSocket client for receiving real-time data from trainer")]
     [SerializeField] private WebSocketClient webSocketClient;
 
+    [Header("MCP Live Input")]
+    [Tooltip("Use Tacx/Garmin telemetry relayed by the Python MCP pipeline for live movement.")]
+    [SerializeField] private bool useMcpLiveInput = true;
+
+    [Tooltip("Seconds before MCP telemetry is considered stale and the controller falls back to WebSocket.")]
+    [SerializeField] private float mcpLiveInputTimeout = 1.5f;
+
+    private float mcpLivePowerWatts = 0f;
+    private float mcpLiveCadenceRpm = 0f;
+    private float mcpLiveSpeedKmh = 0f;
+    private float mcpLastLiveInputTime = -999f;
+
     [Tooltip("Send resistance commands based on terrain slope")]
     [SerializeField] private bool enableResistanceControl = true;
 
@@ -321,6 +333,10 @@ public class BikeController : MonoBehaviour
         {
             HandleSimulationInput();
         }
+        else if (HasFreshMcpLiveInput())
+        {
+            UpdateFromMcpLiveInput();
+        }
         else
         {
             UpdateFromWebSocket();
@@ -407,6 +423,65 @@ public class BikeController : MonoBehaviour
         // Simulate cadence based on power (rough approximation)
         currentCadence = currentPower > 10f ? 60f + (currentPower / 5f) : 0f;
         currentCadence = Mathf.Min(currentCadence, 120f);
+    }
+
+    /// <summary>
+    /// Receives true live Tacx/Garmin telemetry from the Python MCP pipeline.
+    /// Python owns BLE/hardware and Unity only consumes normalized telemetry.
+    /// </summary>
+    public void ApplyLiveMcpTelemetry(float cadenceRpm, float speedKmh, float powerWatts)
+    {
+        if (!useMcpLiveInput) return;
+
+        mcpLiveCadenceRpm = Mathf.Max(0f, cadenceRpm);
+        mcpLiveSpeedKmh = Mathf.Max(0f, speedKmh);
+        mcpLivePowerWatts = Mathf.Max(0f, powerWatts);
+        mcpLastLiveInputTime = Time.time;
+    }
+
+    private bool HasFreshMcpLiveInput()
+    {
+        return useMcpLiveInput && (Time.time - mcpLastLiveInputTime) <= mcpLiveInputTimeout;
+    }
+
+    private void UpdateFromMcpLiveInput()
+    {
+        currentCadence = mcpLiveCadenceRpm;
+
+        if (mcpLivePowerWatts > 0f)
+        {
+            currentPower = mcpLivePowerWatts;
+        }
+        else if (mcpLiveCadenceRpm > 0f && mcpLiveSpeedKmh > 0f)
+        {
+            float v = mcpLiveSpeedKmh / 3.6f;
+            float estimatedPower = (rollingResistance * totalMass * 9.81f * v) +
+                                   (0.5f * airDensity * frontalArea * dragCoefficient * v * v * v);
+            currentPower = Mathf.Max(estimatedPower, mcpLiveCadenceRpm * 0.8f);
+        }
+        else
+        {
+            currentPower = 0f;
+        }
+
+        if (speedMode == BikeSpeedMode.DirectFromTrainer && mcpLiveSpeedKmh > 0f)
+        {
+            currentSpeed = mcpLiveSpeedKmh / 3.6f;
+        }
+        else if (mcpLivePowerWatts <= 0f && mcpLiveSpeedKmh > 0.5f && mcpLiveCadenceRpm > 0f)
+        {
+            float targetSpeed = mcpLiveSpeedKmh / 3.6f;
+            float gradientFactor = 1f - (currentSlope * 0.08f);
+            gradientFactor = Mathf.Clamp(gradientFactor, 0.3f, 1.5f);
+            float adjustedSpeed = targetSpeed * gradientFactor;
+            currentSpeed = Mathf.Lerp(currentSpeed, adjustedSpeed, Time.deltaTime * 3f);
+            distanceTravelled += currentSpeed * Time.deltaTime;
+        }
+
+        if (Time.frameCount % 120 == 0)
+        {
+            Debug.Log($"[BikeController] MCP live data → Power:{currentPower:F0}W, Cadence:{currentCadence:F0}rpm, Speed:{mcpLiveSpeedKmh:F1}km/h, CurrentSpeed:{currentSpeed:F2}m/s, Dist:{distanceTravelled:F0}m");
+        }
     }
 
     /// <summary>
