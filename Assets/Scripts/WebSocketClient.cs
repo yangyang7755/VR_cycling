@@ -48,6 +48,11 @@ public class WebSocketClient : MonoBehaviour
     [SerializeField] private float heartRateBpm = 0f;
     [SerializeField] private int resistanceLevel = 0;
 
+    [Header("Data Freshness")]
+    [Tooltip("Seconds after which telemetry is considered stale (returns 0)")]
+    [SerializeField] private float dataStaleTimeout = 2.0f;
+    private float lastTelemetryTime = 0f;
+
     // Events
     public event Action OnConnected;
     public event Action OnDisconnected;
@@ -292,6 +297,9 @@ public class WebSocketClient : MonoBehaviour
             
             if (data != null && data.type == "telemetry")
             {
+                // Mark that fresh data arrived
+                lastTelemetryTime = Time.time;
+
                 // Update local values
                 if (data.speed_kmh.HasValue)
                     speedKmh = data.speed_kmh.Value;
@@ -481,11 +489,12 @@ public class WebSocketClient : MonoBehaviour
         }
     }
 
-    // Public getters
-    public float GetSpeedKmh() => speedKmh;
-    public float GetPowerWatts() => powerWatts;
-    public float GetCadenceRpm() => cadenceRpm;
-    public float GetHeartRateBpm() => heartRateBpm;
+    // Public getters — return 0 if data is stale (no fresh telemetry for dataStaleTimeout seconds)
+    private bool IsDataFresh() => (Time.time - lastTelemetryTime) < dataStaleTimeout;
+    public float GetSpeedKmh() => IsDataFresh() ? speedKmh : 0f;
+    public float GetPowerWatts() => IsDataFresh() ? powerWatts : 0f;
+    public float GetCadenceRpm() => IsDataFresh() ? cadenceRpm : 0f;
+    public float GetHeartRateBpm() => IsDataFresh() ? heartRateBpm : 0f;
     public int GetResistanceLevel() => resistanceLevel;
     public bool IsConnected() => isConnected;
 }

@@ -39,7 +39,8 @@ public class PersistentPainVAS : MonoBehaviour
     private void Start()
     {
         CreateUI();
-        Show();
+        // Start hidden — HillClimbExperiment no longer uses this persistent scale
+        Hide();
     }
     
     private void CreateUI()

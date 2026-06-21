@@ -35,7 +35,7 @@ public class HillClimbExperiment : MonoBehaviour
     [SerializeField] private float flatApproachLength = 50f;   // 50m flat start
     [SerializeField] private float hillLength = 450f;           // 450m hill = 500m total
     [SerializeField] private float quitTimeThreshold = 10f;
-    [SerializeField] private float quitSpeedThreshold = 0.5f;
+    [SerializeField] private float quitSpeedThreshold = 3.0f;
     
     [Header("Coins (Group 1 only)")]
     [SerializeField] private int baseCoinsPerHill = 3;
@@ -52,7 +52,7 @@ public class HillClimbExperiment : MonoBehaviour
     private int currentConditionIndex = 0;
     
     // State machine
-    private enum Phase { Idle, HillCue, Countdown, HillClimb, Quitting, Completed, Abandoned, RewardQuestion, RewardRating, BlockEnd }
+    private enum Phase { Idle, HillCue, Countdown, HillClimb, Quitting, Completed, Abandoned, PostClimbPain, RewardQuestion, RewardRating, BlockEnd }
     private Phase currentPhase = Phase.Idle;
     
     private float phaseStartTime;
@@ -151,6 +151,9 @@ public class HillClimbExperiment : MonoBehaviour
     
     private void Start()
     {
+        // Ensure game runs even when Unity Editor loses focus
+        Application.runInBackground = true;
+
         if (routeGenerator == null) routeGenerator = FindObjectOfType<CurvedRouteGenerator>();
         if (bikeController == null) bikeController = FindObjectOfType<BikeController>();
         if (rewardVAS == null) rewardVAS = FindObjectOfType<VASScale>();
@@ -234,19 +237,28 @@ public class HillClimbExperiment : MonoBehaviour
     public void ResetToDefaultConditions()
     {
         conditions.Clear();
-        conditions.Add(new HillCondition { name = "Flat_0pct",    averageGradient = 0f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1000 });
-        conditions.Add(new HillCondition { name = "Steady_1pct",  averageGradient = 1f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1001 });
-        conditions.Add(new HillCondition { name = "Steady_3pct",  averageGradient = 3f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1002 });
-        conditions.Add(new HillCondition { name = "Steady_5pct",  averageGradient = 5f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1003 });
-        conditions.Add(new HillCondition { name = "Steady_8pct",  averageGradient = 8f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 450f, coinReward = 5, terrainSeed = 1004 });
-        Debug.Log($"[HillExperiment] Reset to {conditions.Count} default conditions");
+        // 3 gradients × 1 per block = 3 trials per block
+        // 4 blocks per session = 12 trials total (each gradient seen 4 times)
+        // Each hill: 50m flat approach + 350m climb = 400m total
+        // Gradients: 0% (no pain control), 5% (moderate), 8% (high)
+        conditions.Add(new HillCondition { name = "Flat_0pct",    averageGradient = 0f,  isRolling = false, gradientVariation = 0.1f, steadyNoise = 0.05f, flatApproachMeters = 50f, hillLengthMeters = 350f, coinReward = 5, terrainSeed = 1000 });
+        conditions.Add(new HillCondition { name = "Steady_5pct",  averageGradient = 5f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 350f, coinReward = 5, terrainSeed = 1003 });
+        conditions.Add(new HillCondition { name = "Steady_8pct",  averageGradient = 8f,  isRolling = false, gradientVariation = 0.2f, steadyNoise = 0.1f,  flatApproachMeters = 50f, hillLengthMeters = 350f, coinReward = 5, terrainSeed = 1004 });
+        Debug.Log($"[HillExperiment] Reset to {conditions.Count} conditions (0%, 5%, 8% × 400m)");
     }
     
     private void GenerateConditionOrder()
     {
         conditionOrder.Clear();
-        for (int i = 0; i < conditions.Count; i++)
-            conditionOrder.Add(i);
+
+        // 1 of each condition per block (3 gradients = 3 trials per block)
+        // Repeats come from running 4 blocks total (2 intrinsic + 2 group-dependent)
+        int repeats = 1;
+        for (int rep = 0; rep < repeats; rep++)
+        {
+            for (int i = 0; i < conditions.Count; i++)
+                conditionOrder.Add(i);
+        }
 
         // Randomize using participant ID + block number as seed.
         // Same participant in a new block (different blockNumber) gets a different order.
@@ -268,8 +280,9 @@ public class HillClimbExperiment : MonoBehaviour
             conditionOrder[j] = temp;
         }
 
-        Debug.Log($"[HillExperiment] Condition order (seed={seed}, pid={participantID}, block={blockNumber}): " +
-                  $"{string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
+        Debug.Log($"[HillExperiment] {conditionOrder.Count} trials (3 gradients × 1 per block), " +
+                  $"seed={seed}, pid={participantID}, block={blockNumber}");
+        Debug.Log($"[HillExperiment] Order: {string.Join(", ", conditionOrder.Select(i => conditions[i].name))}");
     }
     
     private void CreateUI()
@@ -300,7 +313,7 @@ public class HillClimbExperiment : MonoBehaviour
             RectTransform cpRect = coinPanel.GetComponent<RectTransform>();
             cpRect.anchoredPosition = new Vector2(0f, -60f);
             coinCounterText = CreateText(coinPanel.transform, "CoinText", 20, new Color(1f, 0.85f, 0.2f));
-            coinCounterText.text = "🪙 0";
+            coinCounterText.text = "0";
             coinPanel.GetComponent<Image>().color = new Color(0.05f, 0.05f, 0.1f, 0.6f);
         }
     }
@@ -344,17 +357,30 @@ public class HillClimbExperiment : MonoBehaviour
         participantID = pid;
         blockNumber = block;
         
-        // Auto-assign group based on participant number:
-        // Odd participant numbers → Reward (coins visible)
-        // Even participant numbers → Control (no coins)
+        // Within-subjects design (4 blocks per session):
+        //   Block 1-2: ALWAYS Intrinsic/Control (no coins) for ALL participants
+        //   Block 3-4: depends on group:
+        //     Odd participant # (Group 2: Intrinsic→Extrinsic): Reward (coins visible)
+        //     Even participant # (Group 1: Intrinsic→Intrinsic): Control (no coins)
         int participantNum = 0;
-        // Extract number from participant ID (e.g., "P001" → 1, "P12" → 12, "3" → 3)
         string numStr = System.Text.RegularExpressions.Regex.Replace(pid, "[^0-9]", "");
         if (!string.IsNullOrEmpty(numStr))
             int.TryParse(numStr, out participantNum);
         
-        group = (participantNum % 2 != 0) ? ExperimentGroup.Reward : ExperimentGroup.Control;
-        Debug.Log($"[HillExperiment] Participant {pid} (number={participantNum}) → Group: {group} (odd=Reward/coins, even=Control)");
+        if (block <= 2)
+        {
+            // Blocks 1-2: always Intrinsic (no coins) for everyone
+            group = ExperimentGroup.Control;
+        }
+        else
+        {
+            // Blocks 3-4: odd participants get Extrinsic (coins), even stay Intrinsic
+            group = (participantNum % 2 != 0) ? ExperimentGroup.Reward : ExperimentGroup.Control;
+        }
+        
+        string allocGroup = (participantNum % 2 != 0) ? "2 (Intrinsic→Extrinsic)" : "1 (Intrinsic→Intrinsic)";
+        Debug.Log($"[HillExperiment] Participant {pid} (#{participantNum}), Allocation: {allocGroup}");
+        Debug.Log($"[HillExperiment] Block {block} → {group} (coins {(group == ExperimentGroup.Reward ? "ON" : "OFF")})");
         
         GenerateConditionOrder();
         currentConditionIndex = 0;
@@ -375,6 +401,73 @@ public class HillClimbExperiment : MonoBehaviour
         if (EventMarkerSender.Instance != null)
             EventMarkerSender.Instance.SendEvent("BLOCK_START", $"participant={participantID},block={blockNumber},group={group}");
         
+        // Block 1 only: show EEG resting baseline before trials start
+        if (block == 1)
+        {
+            StartCoroutine(RunBaselineThenStart());
+        }
+        else
+        {
+            StartNextCondition();
+        }
+    }
+
+    /// <summary>
+    /// EEG resting baseline: 4 minutes sit still, look at screen.
+    /// Only runs for Block 1 (first block of the session).
+    /// </summary>
+    private System.Collections.IEnumerator RunBaselineThenStart()
+    {
+        // Lock bike during baseline
+        if (bikeController != null) bikeController.LockBike();
+
+        // Show fixation cross on black background
+        if (cueBgPanel == null)
+        {
+            Canvas canvas = uiCanvas;
+            cueBgPanel = new GameObject("CueBgPanel");
+            cueBgPanel.transform.SetParent(canvas != null ? canvas.transform : transform, false);
+            RectTransform bgrt = cueBgPanel.AddComponent<RectTransform>();
+            bgrt.anchorMin = Vector2.zero;
+            bgrt.anchorMax = Vector2.one;
+            bgrt.offsetMin = Vector2.zero;
+            bgrt.offsetMax = Vector2.zero;
+            Image bgImg = cueBgPanel.AddComponent<Image>();
+            bgImg.color = new Color(0f, 0f, 0f, 1f);
+        }
+        cueBgPanel.SetActive(true);
+        cueBgPanel.transform.SetAsLastSibling();
+        cuePanel.SetActive(true);
+        cuePanel.transform.SetAsLastSibling();
+
+        // 4 minute resting baseline — fixation cross
+        cueText.fontSize = 120;
+        cueText.text = "+";
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("BASELINE_START");
+        Debug.Log("[HillExperiment] Baseline: 4 minutes (fixation cross). Press Escape to skip.");
+
+        // Wait 240s or until Escape is pressed
+        float baselineStart = Time.time;
+        while (Time.time - baselineStart < 240f)
+        {
+            if (Input.GetKeyDown(KeyCode.Escape))
+            {
+                Debug.Log("[HillExperiment] Baseline skipped by experimenter");
+                break;
+            }
+            yield return null;
+        }
+
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("BASELINE_END");
+
+        // Done — hide overlay and start trials
+        cuePanel.SetActive(false);
+        cueBgPanel.SetActive(false);
+        if (bikeController != null) bikeController.UnlockBike();
+
+        Debug.Log("[HillExperiment] Baseline complete — starting trials");
         StartNextCondition();
     }
     
@@ -395,6 +488,13 @@ public class HillClimbExperiment : MonoBehaviour
         HillCondition cond = conditions[condIdx];
 
         Debug.Log($"\n[HillExperiment] === Condition {currentConditionIndex + 1}/{conditionOrder.Count}: {cond.name} ({cond.averageGradient}%, {(cond.isRolling ? "Rolling" : "Steady")}) ===");
+
+        // CRITICAL: Reset bike BEFORE generating the route.
+        // GenerateRoute() calls SetMaxCourseDistance() internally, and if distanceTravelled
+        // is still at 500m from the previous condition, the boundary check would immediately
+        // re-trigger course completion on the next frame.
+        if (bikeController != null)
+            bikeController.ResetCourse();
 
         if (routeGenerator != null)
         {
@@ -419,16 +519,21 @@ public class HillClimbExperiment : MonoBehaviour
         yield return null;
         yield return null;
 
+        // Reset bike again after route is built (ensures distance is 0 and course limit is fresh)
         if (bikeController != null)
             bikeController.ResetCourse();
 
-        // Force progress bar to resample with the new elevation profile
+        // Force progress bar to use the correct trial distance (flat + hill)
         ElevationProgressBar progressBar = FindObjectOfType<ElevationProgressBar>();
         if (progressBar != null)
-            progressBar.ResetProgress();
+        {
+            float totalTrialDist = cond.flatApproachMeters + cond.hillLengthMeters;
+            progressBar.SetTotalRouteLength(totalTrialDist);
+        }
 
         coinsCollected = 0;
         noSpeedTimer = 0f;
+        postClimbPainShown = false;
         phaseStartTime = Time.time;
         phaseStartDistance = bikeController != null ? bikeController.GetDistance() : 0f;
 
@@ -467,8 +572,22 @@ public class HillClimbExperiment : MonoBehaviour
             case Phase.Countdown:
                 if (profileBar != null) profileBar.Hide();
                 if (bikeController != null) bikeController.LockBike();
-                // Show countdown on cue panel (no black bg)
+                // Show countdown with black background for visibility
+                if (cueBgPanel != null)
+                {
+                    cueBgPanel.SetActive(true);
+                    cueBgPanel.transform.SetAsLastSibling();
+                }
+                // Reset cue panel to full screen for countdown numbers
+                RectTransform cueRect = cuePanel.GetComponent<RectTransform>();
+                cueRect.anchorMin = new Vector2(0.1f, 0.1f);
+                cueRect.anchorMax = new Vector2(0.9f, 0.9f);
+                cueRect.offsetMin = Vector2.zero;
+                cueRect.offsetMax = Vector2.zero;
+                cuePanel.GetComponent<Image>().color = Color.clear;
                 cuePanel.SetActive(true);
+                cuePanel.transform.SetAsLastSibling();
+                cueText.fontSize = 120;
                 cueText.text = "3";
                 if (EventMarkerSender.Instance != null)
                     EventMarkerSender.Instance.SendEvent("COUNTDOWN_START");
@@ -509,11 +628,28 @@ public class HillClimbExperiment : MonoBehaviour
     
     private void Update()
     {
+        // Ensure game is never paused during an active experiment
+        // (StartScreenUI or other systems may accidentally set timeScale=0)
+        if (experimentRunning && Time.timeScale < 0.01f)
+        {
+            Time.timeScale = 1f;
+            Debug.LogWarning("[HillExperiment] Forced timeScale back to 1 — something tried to pause mid-experiment");
+        }
+
         // F7 = Force start experiment (debug shortcut)
         if (!experimentRunning && Input.GetKeyDown(KeyCode.F7))
         {
             Debug.Log("[HillExperiment] F7 pressed — FORCE STARTING BLOCK");
             StartBlock("TEST", 1, ExperimentGroup.Reward);
+            return;
+        }
+
+        // Escape on end-of-block screen = return to start page
+        if (!experimentRunning && currentPhase == Phase.BlockEnd && Input.GetKeyDown(KeyCode.Escape))
+        {
+            cuePanel.SetActive(false);
+            if (cueBgPanel != null) cueBgPanel.SetActive(false);
+            ReturnToStartScreen();
             return;
         }
 
@@ -564,35 +700,8 @@ public class HillClimbExperiment : MonoBehaviour
                 
             case Phase.Completed:
             case Phase.Abandoned:
-                // POST-CLIMB REST PERIOD: 5 seconds for pain rating
-                // Pain VAS still visible so participants rate residual pain
+                // POST-CLIMB: show completion message for 3s, then move to pain question
                 float restElapsed = Time.time - phaseStartTime;
-                
-                // Update countdown timer on screen
-                int remainingRest = Mathf.CeilToInt(5f - restElapsed);
-                if (completionPanel.activeSelf && completionText != null)
-                {
-                    int condIdx2 = conditionOrder[currentConditionIndex];
-                    HillCondition cond2 = conditions[condIdx2];
-                    bool wasCompleted = (currentPhase == Phase.Completed);
-                    
-                    string timerMsg;
-                    if (wasCompleted)
-                    {
-                        timerMsg = "<size=36><color=#4CAF50>✓ Hill Complete!</color></size>";
-                        if (group == ExperimentGroup.Reward && coinsCollected > 0)
-                            timerMsg += $"\n<size=24><color=#FFD700>Coins earned: {coinsCollected} 🪙</color></size>";
-                    }
-                    else
-                    {
-                        timerMsg = "<size=36><color=#FF5555>Hill Incomplete</color></size>";
-                    }
-                    
-                    timerMsg += "\n\n<size=22><color=#CCCCCC>Rate your pain.</color></size>" +
-                               $"\n\n<size=20><color=#AAAAAA>{remainingRest}s</color></size>";
-                    
-                    completionText.text = timerMsg;
-                }
                 
                 // Send EEG marker at start of rest
                 if (restElapsed < 0.1f)
@@ -602,17 +711,18 @@ public class HillClimbExperiment : MonoBehaviour
                             $"condition={currentConditionIndex + 1},completed={currentPhase == Phase.Completed}");
                 }
                 
-                // After 5s rest, proceed to reward question
-                if (restElapsed > 5f)
+                // After 3s, show the pain question on black background
+                if (restElapsed > 3f)
                 {
-                    if (EventMarkerSender.Instance != null)
-                        EventMarkerSender.Instance.SendEvent("POST_CLIMB_REST_END", 
-                            $"final_pain_vas={(painVAS != null ? painVAS.GetCurrentValue() : -1f):F1}");
                     completionPanel.SetActive(false);
-                    SetPhase(Phase.RewardQuestion);
+                    ShowPostClimbPainQuestion();
                 }
                 break;
             
+            case Phase.PostClimbPain:
+                HandlePostClimbPainInput();
+                break;
+
             case Phase.RewardQuestion:
                 // Show "How rewarding was this trial?" for 5 seconds (EEG deliberation window)
                 if (Time.time - phaseStartTime > 5f)
@@ -620,42 +730,8 @@ public class HillClimbExperiment : MonoBehaviour
                 break;
                 
             case Phase.RewardRating:
-                // Detect reward submission by counting VAS responses
-                // F6 = force skip for experimenter
-                if (Input.GetKeyDown(KeyCode.F6))
-                {
-                    FinishCondition();
-                }
-                else if (rewardVAS == null)
-                {
-                    // No VAS system — auto-advance after 3 seconds (not instant)
-                    if (Time.time - phaseStartTime > 3f)
-                    {
-                        Debug.Log("[HillExperiment] No reward VAS — auto-advancing after 3s");
-                        FinishCondition();
-                    }
-                }
-                else if (Time.time - phaseStartTime > 0.5f && rewardVAS.GetResponseCount() > rewardResponseCountAtStart)
-                {
-                    // Participant submitted a rating — wait 2s then advance
-                    // (0.5s grace period prevents detecting stale responses from prior condition)
-                    if (!rewardRatingConfirmed)
-                    {
-                        rewardRatingConfirmed = true;
-                        rewardConfirmTime = Time.time;
-                        Debug.Log($"[HillExperiment] Reward rating submitted (count: {rewardVAS.GetResponseCount()}, expected > {rewardResponseCountAtStart})");
-                    }
-                    if (Time.time - rewardConfirmTime > 2f)
-                    {
-                        FinishCondition();
-                    }
-                }
-                else if (Time.time - phaseStartTime > 60f)
-                {
-                    // 60s timeout fallback
-                    Debug.Log("[HillExperiment] Reward timeout (60s)");
-                    FinishCondition();
-                }
+                // Same format as pain rating: 1-10 keypress on black background
+                HandleRewardRatingInput();
                 break;
         }
         
@@ -748,13 +824,13 @@ public class HillClimbExperiment : MonoBehaviour
                         $"{hillVisual}\n\n" +
                         $"{diffBar}\n\n" +
                         $"<size=20>" +
-                        $"<color=#CCCCCC>Profile:</color> <color=#FFFFFF>{(cond.isRolling ? "Rolling ↝" : "Steady →")}</color>    " +
-                        $"<color=#CCCCCC>Distance:</color> <color=#FFFFFF>{cond.hillLengthMeters:F0}m</color>    " +
+                        $"<color=#CCCCCC>Profile:</color> <color=#FFFFFF>{(cond.isRolling ? "Rolling" : "Steady")}</color>    " +
+                        $"<color=#CCCCCC>Distance:</color> <color=#FFFFFF>{cond.flatApproachMeters + cond.hillLengthMeters:F0}m</color>    " +
                         $"<color=#CCCCCC>Climb:</color> <color=#FFFFFF>+{elevGain:F0}m</color></size>";
 
         if (group == ExperimentGroup.Reward)
         {
-            cueMsg += $"\n\n<size=26><color=#FFD700>🪙 × 5</color></size>";
+            cueMsg += $"\n\n<size=26><color=#FFD700>COINS x 5</color></size>";
         }
 
         cueText.text = cueMsg;
@@ -967,7 +1043,13 @@ public class HillClimbExperiment : MonoBehaviour
         Debug.Log($"[HillExperiment] === HILL CLIMB STARTED === {cond.name}, {cond.averageGradient}%, " +
                   $"distance={flatApproachLength + hillLength}m, experimentRunning={experimentRunning}");
 
-        if (painVAS != null) painVAS.Show();
+        // Hide the persistent pain VAS — we now use timed 30s popup prompts instead
+        if (painVAS != null) painVAS.Hide();
+        
+        // Reset pain prompt timer for this climb
+        lastPainPromptTime = Time.time;
+        painPromptCount = 0;
+        painPromptActive = false;
 
         if (group == ExperimentGroup.Reward)
             SpawnCoins(cond.coinReward);
@@ -1091,6 +1173,28 @@ public class HillClimbExperiment : MonoBehaviour
     private float lastEpochMarkerTime = 0f;
     private float eegEpochInterval = 30f; // Send EEG epoch marker every 30 seconds
     private int epochCount = 0;
+
+    // Pain prompt (every 30s during climb)
+    private float lastPainPromptTime = 0f;
+    private float painPromptInterval = 30f;
+    private int painPromptCount = 0;
+    private bool painPromptActive = false;
+    private int painPromptRating = 0; // 0 = not yet rated
+    private float painPromptShowTime = 0f;
+    private GameObject painPromptPanel;
+    private TextMeshProUGUI painPromptText;
+    private TextMeshProUGUI painRatingText;
+    private List<PainRatingRecord> painRatings = new List<PainRatingRecord>();
+
+    [System.Serializable]
+    public class PainRatingRecord
+    {
+        public int conditionIndex;
+        public string conditionName;
+        public float timeIntoClimb;
+        public float distance;
+        public int rating; // 1-10
+    }
     
     private void UpdateHillClimb(float dist, float speed)
     {
@@ -1103,15 +1207,24 @@ public class HillClimbExperiment : MonoBehaviour
             epochCount++;
             lastEpochMarkerTime = climbElapsed;
             
-            float currentPainVAS = painVAS != null ? painVAS.GetCurrentValue() : -1f;
             float currentGradient = bikeController != null ? bikeController.GetGradient() : 0f;
             
             if (EventMarkerSender.Instance != null)
                 EventMarkerSender.Instance.SendEvent("EEG_EPOCH", 
                     $"epoch={epochCount},elapsed={climbElapsed:F0}s,dist={hillDist:F0}m," +
-                    $"pain_vas={currentPainVAS:F1},gradient={currentGradient:F1},speed={speed:F1}");
+                    $"gradient={currentGradient:F1},speed={speed:F1}");
             
-            Debug.Log($"[EEG] EPOCH {epochCount} — {climbElapsed:F0}s, pain={currentPainVAS:F1}, grade={currentGradient:F1}%");
+            Debug.Log($"[EEG] EPOCH {epochCount} — {climbElapsed:F0}s, grade={currentGradient:F1}%");
+        }
+
+        // === PAIN PROMPT every 30s ===
+        if (!painPromptActive && (Time.time - lastPainPromptTime >= painPromptInterval))
+        {
+            ShowPainPrompt();
+        }
+        if (painPromptActive)
+        {
+            HandlePainPromptInput();
         }
         
         // Debug: log on first frame of hill climb
@@ -1122,6 +1235,11 @@ public class HillClimbExperiment : MonoBehaviour
         // SKIP entirely in simulation mode
         // SKIP during flat approach (rider may not have started pedalling yet)
         bool pastFlatApproach = hillDist > flatApproachLength;
+        
+        // Disengagement detection: speed < 3 km/h (coasting/stopped)
+        // Cadence is unreliable (sticks at last reported value from trainer)
+        bool notPedalling = (speed < quitSpeedThreshold);
+        
         if (simulationModeActive)
         {
             noSpeedTimer = 0f; // Never accumulate in sim mode
@@ -1130,37 +1248,38 @@ public class HillClimbExperiment : MonoBehaviour
         {
             noSpeedTimer = 0f; // Don't penalise during flat lead-in
         }
-        else if (speed < quitSpeedThreshold)
+        else if (notPedalling)
         {
             noSpeedTimer += Time.deltaTime;
             
-            // After 5s of no pedaling, show 10s countdown
-            if (noSpeedTimer >= 5f)
+            // After 3s grace, show 10s countdown (total 13s to abandon)
+            if (noSpeedTimer >= 3f)
             {
-                float countdownRemaining = 15f - noSpeedTimer; // 5s grace + 10s countdown = 15s total
+                float countdownRemaining = 13f - noSpeedTimer; // 3s grace + 10s countdown
                 
                 // Send EEG marker at the start of the countdown (once)
-                if (noSpeedTimer >= 5f && noSpeedTimer - Time.deltaTime < 5f)
+                if (noSpeedTimer >= 3f && noSpeedTimer - Time.deltaTime < 3f)
                 {
                     if (EventMarkerSender.Instance != null)
                         EventMarkerSender.Instance.SendEvent("DISENGAGE_ONSET", 
-                            $"condition={currentConditionIndex + 1}");
+                            $"condition={currentConditionIndex + 1},speed={speed:F1}");
                     Debug.Log("[EEG] DISENGAGE_ONSET — 10s countdown started");
                 }
                 
                 if (countdownRemaining > 0f)
                 {
                     cuePanel.SetActive(true);
-                    cueText.text = $"⚠ Resume pedaling!\n\nTrial ends in: {Mathf.CeilToInt(countdownRemaining)}s";
+                    cueText.fontSize = 48;
+                    cueText.text = $"RESUME PEDALING!\n\nTrial ends in: {Mathf.CeilToInt(countdownRemaining)}s";
                 }
                 
-                if (noSpeedTimer >= 15f) // 5s grace + 10s countdown
+                if (noSpeedTimer >= 13f) // 3s grace + 10s countdown
                 {
                     cuePanel.SetActive(false);
-                    Debug.Log($"[HillExperiment] QUIT — no pedaling for 15s");
+                    Debug.Log($"[HillExperiment] QUIT — no pedaling for {noSpeedTimer:F1}s (speed={speed:F1})");
                     if (EventMarkerSender.Instance != null)
                         EventMarkerSender.Instance.SendEvent("DISENGAGE_QUIT", 
-                            $"condition={currentConditionIndex + 1},no_speed_duration={noSpeedTimer:F1}");
+                            $"condition={currentConditionIndex + 1},no_pedal_duration={noSpeedTimer:F1}");
                     Debug.Log("[EEG] DISENGAGE_QUIT");
                     SetPhase(Phase.Abandoned);
                     return;
@@ -1169,13 +1288,13 @@ public class HillClimbExperiment : MonoBehaviour
         }
         else
         {
-            // Resumed pedaling — reset timer and hide countdown
-            if (noSpeedTimer >= 5f)
+            // Resumed pedaling — reset timer and hide countdown immediately
+            if (noSpeedTimer >= 3f)
             {
                 cuePanel.SetActive(false);
                 if (EventMarkerSender.Instance != null)
                     EventMarkerSender.Instance.SendEvent("DISENGAGE_RESUME", 
-                        $"condition={currentConditionIndex + 1}");
+                        $"condition={currentConditionIndex + 1},resumed_at={noSpeedTimer:F1}s");
                 Debug.Log("[EEG] DISENGAGE_RESUME — participant resumed pedaling");
             }
             noSpeedTimer = 0f;
@@ -1185,8 +1304,9 @@ public class HillClimbExperiment : MonoBehaviour
         if (group == ExperimentGroup.Reward)
             CheckCoinCollection(hillDist);
         
-        // Check hill completion
-        if (hillDist >= hillLength)
+        // Check hill completion (total distance = flat approach + hill)
+        float totalConditionDistance = flatApproachLength + hillLength;
+        if (hillDist >= totalConditionDistance)
         {
             Debug.Log($"[HillExperiment] Hill COMPLETED at {hillDist:F0}m");
             if (EventMarkerSender.Instance != null)
@@ -1200,42 +1320,314 @@ public class HillClimbExperiment : MonoBehaviour
     {
         get { return bikeController != null && bikeController.IsSimulationMode(); }
     }
-    
+
+    // === PAIN PROMPT (every 30s) ===
+
+    private void ShowPainPrompt()
+    {
+        painPromptActive = true;
+        painPromptRating = 5; // default to middle
+        painPromptShowTime = Time.time;
+        painPromptCount++;
+        lastPainPromptTime = Time.time;
+
+        EnsurePainPromptUI();
+        painPromptPanel.SetActive(true);
+        UpdatePainPromptDisplay();
+
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("PAIN_PROMPT_SHOW", $"prompt={painPromptCount}");
+
+        Debug.Log($"[HillExperiment] Pain prompt #{painPromptCount} shown");
+    }
+
+    private void HandlePainPromptInput()
+    {
+        // Number keys 1-9 and 0(=10) for quick rating
+        for (int i = 1; i <= 9; i++)
+        {
+            if (Input.GetKeyDown(KeyCode.Alpha1 + (i - 1)) || Input.GetKeyDown(KeyCode.Keypad1 + (i - 1)))
+            {
+                painPromptRating = i;
+                SubmitPainRating();
+                return;
+            }
+        }
+        if (Input.GetKeyDown(KeyCode.Alpha0) || Input.GetKeyDown(KeyCode.Keypad0))
+        {
+            painPromptRating = 10;
+            SubmitPainRating();
+            return;
+        }
+
+        // Left/Right arrows to adjust, Enter to confirm
+        if (Input.GetKeyDown(KeyCode.LeftArrow))
+            painPromptRating = Mathf.Max(1, painPromptRating - 1);
+        if (Input.GetKeyDown(KeyCode.RightArrow))
+            painPromptRating = Mathf.Min(10, painPromptRating + 1);
+        if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+        {
+            SubmitPainRating();
+            return;
+        }
+
+        // Auto-dismiss after 10 seconds (use current value)
+        if (Time.time - painPromptShowTime > 10f)
+        {
+            SubmitPainRating();
+            return;
+        }
+
+        UpdatePainPromptDisplay();
+    }
+
+    private void SubmitPainRating()
+    {
+        painPromptActive = false;
+        if (painPromptPanel != null) painPromptPanel.SetActive(false);
+
+        float hillDist = bikeController != null ? bikeController.GetDistance() - phaseStartDistance : 0f;
+        float climbElapsed = Time.time - phaseStartTime;
+
+        // Record the rating
+        int condIdx = currentConditionIndex < conditionOrder.Count ? conditionOrder[currentConditionIndex] : 0;
+        HillCondition cond = condIdx < conditions.Count ? conditions[condIdx] : null;
+
+        PainRatingRecord record = new PainRatingRecord
+        {
+            conditionIndex = currentConditionIndex,
+            conditionName = cond != null ? cond.name : "unknown",
+            timeIntoClimb = climbElapsed,
+            distance = hillDist,
+            rating = painPromptRating
+        };
+        painRatings.Add(record);
+
+        // Log + EEG marker
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("PAIN_RATING",
+                $"rating={painPromptRating},prompt={painPromptCount},dist={hillDist:F0}m,time={climbElapsed:F0}s");
+
+        Debug.Log($"[HillExperiment] Pain rating: {painPromptRating}/10 (prompt #{painPromptCount}, {climbElapsed:F0}s, {hillDist:F0}m)");
+
+        // Also write to the trial log
+        LogDataPoint($"PAIN_RATING_{painPromptRating}");
+    }
+
+    private void EnsurePainPromptUI()
+    {
+        if (painPromptPanel != null) return;
+
+        // Create a bottom-center overlay panel for the pain prompt
+        Canvas existingCanvas = uiCanvas;
+        if (existingCanvas == null) return;
+
+        painPromptPanel = new GameObject("PainPromptPanel");
+        painPromptPanel.transform.SetParent(existingCanvas.transform, false);
+        RectTransform panelRect = painPromptPanel.AddComponent<RectTransform>();
+        panelRect.anchorMin = new Vector2(0.5f, 0.15f);
+        panelRect.anchorMax = new Vector2(0.5f, 0.15f);
+        panelRect.pivot = new Vector2(0.5f, 0f);
+        panelRect.sizeDelta = new Vector2(500f, 100f);
+
+        Image bg = painPromptPanel.AddComponent<Image>();
+        bg.color = new Color(0.05f, 0.05f, 0.1f, 0.9f);
+
+        // Question text
+        GameObject qObj = new GameObject("QuestionText");
+        qObj.transform.SetParent(painPromptPanel.transform, false);
+        painPromptText = qObj.AddComponent<TextMeshProUGUI>();
+        painPromptText.text = "How intense is the pain in your legs?";
+        painPromptText.fontSize = 20;
+        painPromptText.color = new Color(1f, 0.85f, 0.3f);
+        painPromptText.alignment = TextAlignmentOptions.Center;
+        painPromptText.fontStyle = FontStyles.Bold;
+        RectTransform qRect = qObj.GetComponent<RectTransform>();
+        qRect.anchorMin = new Vector2(0f, 0.55f);
+        qRect.anchorMax = new Vector2(1f, 1f);
+        qRect.offsetMin = new Vector2(10f, 0f);
+        qRect.offsetMax = new Vector2(-10f, -5f);
+
+        // Rating display + instructions
+        GameObject rObj = new GameObject("RatingText");
+        rObj.transform.SetParent(painPromptPanel.transform, false);
+        painRatingText = rObj.AddComponent<TextMeshProUGUI>();
+        painRatingText.fontSize = 24;
+        painRatingText.color = Color.white;
+        painRatingText.alignment = TextAlignmentOptions.Center;
+        painRatingText.richText = true;
+        RectTransform rRect = rObj.GetComponent<RectTransform>();
+        rRect.anchorMin = new Vector2(0f, 0f);
+        rRect.anchorMax = new Vector2(1f, 0.55f);
+        rRect.offsetMin = new Vector2(10f, 5f);
+        rRect.offsetMax = new Vector2(-10f, 0f);
+
+        painPromptPanel.SetActive(false);
+    }
+
+    private void UpdatePainPromptDisplay()
+    {
+        if (painRatingText == null) return;
+
+        // Build number row with current selection highlighted
+        string row = "";
+        for (int i = 1; i <= 10; i++)
+        {
+            if (i == painPromptRating)
+                row += $"<color=#FFD700><b>[{i}]</b></color> ";
+            else
+                row += $"<color=#888888>{i}</color> ";
+        }
+
+        float remaining = 10f - (Time.time - painPromptShowTime);
+        painRatingText.text = $"{row}\n<size=14><color=#AAAAAA>Press 1-10 or ←/→ + Enter ({remaining:F0}s)</color></size>";
+    }
+
     private void ShowCompletion(bool completed)
     {
-        // Keep pain VAS visible for residual pain rating during rest
-        if (painVAS != null) painVAS.Show();
+        // Hide pain VAS and dismiss any active pain prompt
+        if (painVAS != null) painVAS.Hide();
+        painPromptActive = false;
+        if (painPromptPanel != null) painPromptPanel.SetActive(false);
+        
+        // LOCK the bike — stop all movement immediately
+        if (bikeController != null) bikeController.LockBike();
         
         // Hide the black cue background if it was showing
         if (cueBgPanel != null) cueBgPanel.SetActive(false);
         
-        // Show completion message with rest instructions
+        // Show completion message briefly (3 seconds)
         string msg;
         if (completed)
         {
-            msg = "<size=36><color=#4CAF50>✓ Hill Complete!</color></size>";
+            msg = "<size=36><color=#4CAF50>HILL COMPLETE!</color></size>";
             if (group == ExperimentGroup.Reward && coinsCollected > 0)
-                msg += $"\n<size=24><color=#FFD700>Coins earned: {coinsCollected} 🪙</color></size>";
+                msg += $"\n<size=24><color=#FFD700>Coins earned: {coinsCollected}</color></size>";
         }
         else
         {
             msg = "<size=36><color=#FF5555>Hill Incomplete</color></size>";
         }
         
-        msg += "\n\n<size=22><color=#CCCCCC>Please remain still.</color></size>" +
-               "\n<size=22><color=#CCCCCC>Continue rating your pain.</color></size>" +
-               "\n\n<size=18><color=#888888>Rest period: 30 seconds</color></size>";
+        msg += "\n\n<size=22><color=#CCCCCC>Please remain still.</color></size>";
         
         completionText.text = msg;
         completionText.richText = true;
         completionText.color = Color.white;
         completionPanel.SetActive(true);
-        
-        // Set resistance to zero so bike freewheels
-        if (bikeController != null)
-            bikeController.SetMaxCourseDistance(0f);
     }
     
+    /// <summary>
+    /// Show a full-screen black background with pain question (1-10 keypress).
+    /// Similar to reward question but for pain intensity after the climb.
+    /// </summary>
+    private bool postClimbPainShown = false;
+    private int postClimbPainRating = 5;
+    private float postClimbPainShowTime = 0f;
+
+    private void ShowPostClimbPainQuestion()
+    {
+        if (postClimbPainShown) return; // only trigger once per condition
+        postClimbPainShown = true;
+        currentPhase = Phase.PostClimbPain;
+        phaseStartTime = Time.time;
+        postClimbPainRating = 5;
+        postClimbPainShowTime = Time.time;
+
+        // Black background
+        if (cueBgPanel == null)
+        {
+            Canvas canvas = FindObjectOfType<Canvas>();
+            cueBgPanel = new GameObject("CueBgPanel");
+            cueBgPanel.transform.SetParent(canvas != null ? canvas.transform : cuePanel.transform.parent, false);
+            RectTransform bgrt = cueBgPanel.AddComponent<RectTransform>();
+            bgrt.anchorMin = Vector2.zero;
+            bgrt.anchorMax = Vector2.one;
+            bgrt.offsetMin = Vector2.zero;
+            bgrt.offsetMax = Vector2.zero;
+            Image bgImg = cueBgPanel.AddComponent<Image>();
+            bgImg.color = new Color(0f, 0f, 0f, 0.95f);
+        }
+        cueBgPanel.SetActive(true);
+        cueBgPanel.transform.SetAsLastSibling();
+
+        cueText.fontSize = 28;
+        cueText.text = BuildPostClimbPainText();
+        cuePanel.SetActive(true);
+        cuePanel.transform.SetAsLastSibling();
+
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("POST_CLIMB_PAIN_ONSET", $"condition={currentConditionIndex + 1}");
+        Debug.Log("[HillExperiment] Post-climb pain question shown");
+    }
+
+    private string BuildPostClimbPainText()
+    {
+        string row = "";
+        for (int i = 1; i <= 10; i++)
+        {
+            if (i == postClimbPainRating)
+                row += $"<color=#FFD700><b>[{i}]</b></color>  ";
+            else
+                row += $"<color=#888888>{i}</color>  ";
+        }
+        float remaining = 15f - (Time.time - postClimbPainShowTime);
+        return $"<size=28>How much pain did you perceive\nin your legs during the previous task?</size>\n\n" +
+               $"<size=32>{row}</size>\n\n" +
+               $"<size=16><color=#AAAAAA>Press 1-10 or ←/→ + Enter ({remaining:F0}s)</color></size>";
+    }
+
+    private void HandlePostClimbPainInput()
+    {
+        // Number keys 1-9 and 0(=10) for quick rating
+        for (int i = 1; i <= 9; i++)
+        {
+            if (Input.GetKeyDown(KeyCode.Alpha1 + (i - 1)) || Input.GetKeyDown(KeyCode.Keypad1 + (i - 1)))
+            {
+                postClimbPainRating = i;
+                SubmitPostClimbPain();
+                return;
+            }
+        }
+        if (Input.GetKeyDown(KeyCode.Alpha0) || Input.GetKeyDown(KeyCode.Keypad0))
+        {
+            postClimbPainRating = 10;
+            SubmitPostClimbPain();
+            return;
+        }
+        if (Input.GetKeyDown(KeyCode.LeftArrow))
+            postClimbPainRating = Mathf.Max(1, postClimbPainRating - 1);
+        if (Input.GetKeyDown(KeyCode.RightArrow))
+            postClimbPainRating = Mathf.Min(10, postClimbPainRating + 1);
+        if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+        {
+            SubmitPostClimbPain();
+            return;
+        }
+        // Auto-submit after 15s
+        if (Time.time - postClimbPainShowTime > 15f)
+        {
+            SubmitPostClimbPain();
+            return;
+        }
+        // Update display
+        cueText.text = BuildPostClimbPainText();
+    }
+
+    private void SubmitPostClimbPain()
+    {
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("POST_CLIMB_PAIN_RATING",
+                $"rating={postClimbPainRating},condition={currentConditionIndex + 1}");
+        Debug.Log($"[HillExperiment] Post-climb pain: {postClimbPainRating}/10");
+        LogDataPoint($"POST_CLIMB_PAIN_{postClimbPainRating}");
+
+        // Move to reward question
+        cuePanel.SetActive(false);
+        if (cueBgPanel != null) cueBgPanel.SetActive(false);
+        SetPhase(Phase.RewardQuestion);
+    }
+
     private void ShowRewardQuestion()
     {
         completionPanel.SetActive(false);
@@ -1257,7 +1649,8 @@ public class HillClimbExperiment : MonoBehaviour
         cueBgPanel.SetActive(true);
         cueBgPanel.transform.SetAsLastSibling();
         
-        cueText.text = "How rewarding was this trial?\n\n(Think about your answer...)";
+        cueText.fontSize = 36;
+        cueText.text = "How rewarding was your experience\nafter this trial?\n\n<size=24>(Think about your answer...)</size>";
         cuePanel.SetActive(true);
         cuePanel.transform.SetAsLastSibling();
         
@@ -1268,21 +1661,114 @@ public class HillClimbExperiment : MonoBehaviour
         Debug.Log("[EEG] REWARD_QUESTION_ONSET — 5s deliberation window");
     }
     
+    private int rewardRating = 5;
+    private float rewardRatingShowTime = 0f;
+
     private void ShowRewardRating()
     {
-        // Hide question overlay, show rating slider
+        // Show same format as pain: black background with 1-10 keypress
         if (cueBgPanel != null) cueBgPanel.SetActive(false);
         cuePanel.SetActive(false);
         completionPanel.SetActive(false);
-        
-        // === EEG MARKER: REWARD_SLIDER_ONSET ===
+
+        // Black background
+        if (cueBgPanel == null)
+        {
+            Canvas canvas = FindObjectOfType<Canvas>();
+            cueBgPanel = new GameObject("CueBgPanel");
+            cueBgPanel.transform.SetParent(canvas != null ? canvas.transform : cuePanel.transform.parent, false);
+            RectTransform bgrt = cueBgPanel.AddComponent<RectTransform>();
+            bgrt.anchorMin = Vector2.zero;
+            bgrt.anchorMax = Vector2.one;
+            bgrt.offsetMin = Vector2.zero;
+            bgrt.offsetMax = Vector2.zero;
+            Image bgImg = cueBgPanel.AddComponent<Image>();
+            bgImg.color = new Color(0f, 0f, 0f, 0.95f);
+        }
+        cueBgPanel.SetActive(true);
+        cueBgPanel.transform.SetAsLastSibling();
+
+        rewardRating = 5;
+        rewardRatingShowTime = Time.time;
+        cueText.fontSize = 28;
+        cueText.text = BuildRewardRatingText();
+        cuePanel.SetActive(true);
+        cuePanel.transform.SetAsLastSibling();
+
         if (EventMarkerSender.Instance != null)
-            EventMarkerSender.Instance.SendEvent("REWARD_SLIDER_ONSET", 
-                $"condition={currentConditionIndex + 1}");
-        Debug.Log("[EEG] REWARD_SLIDER_ONSET — rating scale active");
-        
-        if (rewardVAS != null)
-            rewardVAS.TriggerVASNow("Reward");
+            EventMarkerSender.Instance.SendEvent("REWARD_SLIDER_ONSET", $"condition={currentConditionIndex + 1}");
+        Debug.Log("[EEG] REWARD_RATING shown (1-10 keypress)");
+    }
+
+    private string BuildRewardRatingText()
+    {
+        string row = "";
+        for (int i = 1; i <= 10; i++)
+        {
+            if (i == rewardRating)
+                row += $"<color=#FFD700><b>[{i}]</b></color>  ";
+            else
+                row += $"<color=#888888>{i}</color>  ";
+        }
+        float remaining = 15f - (Time.time - rewardRatingShowTime);
+        return $"<size=28>How rewarding was your experience\nafter this trial?</size>\n\n" +
+               $"<size=32>{row}</size>\n\n" +
+               $"<size=16><color=#AAAAAA>Press 1-10 or arrow keys + Enter ({remaining:F0}s)</color></size>";
+    }
+
+    private void HandleRewardRatingInput()
+    {
+        // Number keys 1-9 and 0(=10)
+        for (int i = 1; i <= 9; i++)
+        {
+            if (Input.GetKeyDown(KeyCode.Alpha1 + (i - 1)) || Input.GetKeyDown(KeyCode.Keypad1 + (i - 1)))
+            {
+                rewardRating = i;
+                SubmitRewardRating();
+                return;
+            }
+        }
+        if (Input.GetKeyDown(KeyCode.Alpha0) || Input.GetKeyDown(KeyCode.Keypad0))
+        {
+            rewardRating = 10;
+            SubmitRewardRating();
+            return;
+        }
+        if (Input.GetKeyDown(KeyCode.LeftArrow))
+            rewardRating = Mathf.Max(1, rewardRating - 1);
+        if (Input.GetKeyDown(KeyCode.RightArrow))
+            rewardRating = Mathf.Min(10, rewardRating + 1);
+        if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+        {
+            SubmitRewardRating();
+            return;
+        }
+        // F6 = force skip
+        if (Input.GetKeyDown(KeyCode.F6))
+        {
+            SubmitRewardRating();
+            return;
+        }
+        // Auto-submit after 15s
+        if (Time.time - rewardRatingShowTime > 15f)
+        {
+            SubmitRewardRating();
+            return;
+        }
+        cueText.text = BuildRewardRatingText();
+    }
+
+    private void SubmitRewardRating()
+    {
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("REWARD_RATING",
+                $"rating={rewardRating},condition={currentConditionIndex + 1}");
+        Debug.Log($"[HillExperiment] Reward rating: {rewardRating}/10");
+        LogDataPoint($"REWARD_RATING_{rewardRating}");
+
+        cuePanel.SetActive(false);
+        if (cueBgPanel != null) cueBgPanel.SetActive(false);
+        FinishCondition();
     }
     
     private bool finishingCondition = false; // Guard against double-calling
@@ -1351,13 +1837,16 @@ public class HillClimbExperiment : MonoBehaviour
         // Always 5 coins per condition
         count = 5;
         
-        // Generate random distances along the hill (sorted)
+        // Generate random distances along the route (sorted)
+        // Coins are placed within the TOTAL course distance (flat + hill = 400m)
+        // Spread from 15% to 85% of total distance to ensure all are reachable
         System.Random rng = new System.Random(currentConditionIndex * 100 + blockNumber);
         List<float> coinDistances = new List<float>();
+        float totalCourseDist = flatApproachLength + hillLength; // 50 + 350 = 400
         for (int i = 0; i < count; i++)
         {
-            float minDist = hillLength * 0.1f;
-            float maxDist = hillLength * 0.9f;
+            float minDist = totalCourseDist * 0.15f;  // 60m from start
+            float maxDist = totalCourseDist * 0.85f;  // 340m from start
             float dist = minDist + (float)rng.NextDouble() * (maxDist - minDist);
             coinDistances.Add(dist);
         }
@@ -1413,8 +1902,8 @@ public class HillClimbExperiment : MonoBehaviour
             CoinData data = coin.GetComponent<CoinData>();
             if (data == null || data.collected) continue;
             
-            // Total distance from course start = flat approach + coin's hill distance
-            float totalDist = flatApproachLength + data.distanceAlongRoute;
+            // Coin distance is already relative to course start (0-400m)
+            float totalDist = data.distanceAlongRoute;
             
             if (spline != null && spline.GetTotalLength() > 0f)
             {
@@ -1459,9 +1948,9 @@ public class HillClimbExperiment : MonoBehaviour
             CoinData data = coin.GetComponent<CoinData>();
             if (data == null || data.collected) continue;
             
-            // Coin is placed at spline distance = flatApproachLength + distanceAlongRoute
+            // Coin distance is already relative to course start (0-400m)
             // Collect when bike distance reaches or passes the coin position
-            float coinSplineDist = flatApproachLength + data.distanceAlongRoute;
+            float coinSplineDist = data.distanceAlongRoute;
             
             if (bikeDistance >= coinSplineDist - 3f)
             {
@@ -1487,7 +1976,7 @@ public class HillClimbExperiment : MonoBehaviour
     {
         if (coinCounterText != null)
         {
-            coinCounterText.text = $"🪙 {coinsCollected} / 5";
+            coinCounterText.text = $"{coinsCollected} / 5";
             
             // Flash effect on collection
             if (coinsCollected > 0)
@@ -1599,8 +2088,8 @@ public class HillClimbExperiment : MonoBehaviour
             }
 
             Debug.Log($"[HillExperiment] Earnings written → {csvPath}");
-            Debug.Log($"[HillExperiment] {participantID} earned £{earningsGbp:F2} " +
-                      $"({totalCoinsCollected}/{coinsPossible} coins)");
+            Debug.Log($"[HillExperiment] {participantID} Block {blockNumber}: earned £{earningsGbp:F2} " +
+                      $"({totalCoinsCollected} coins collected, {coinsPossible} possible from {conditionsCompleted} completed conditions)");
         }
         catch (System.Exception e)
         {
@@ -1637,26 +2126,299 @@ public class HillClimbExperiment : MonoBehaviour
         // Write participant earnings to the persistent CSV tracker
         WriteEarningsCSV();
         
-        // Return to participant ID entry screen for next participant/block
-        StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true); // include inactive
+        // Start post-block questionnaire
+        StartCoroutine(RunPostBlockQuestionnaire());
+    }
+
+    // === POST-BLOCK QUESTIONNAIRE ===
+
+    private int postBlockQuestionIndex = 0;
+    private int postBlockRating = 5;
+    private float postBlockQuestionShowTime = 0f;
+    private List<int> postBlockResponses = new List<int>();
+
+    private readonly string[] postBlockQuestions = new string[]
+    {
+        "During the previous hills, to what extent\ndid you experience <color=#FF6666>muscle burning/pain</color>?",
+        "During the previous hills, to what extent\ndid you experience <color=#66AAFF>breathlessness</color>?",
+        "During the previous hills, how would you\nrate your <color=#FFAA33>physical effort</color>?",
+        "During the previous hills, how would you\nrate your <color=#AA66FF>mental effort</color>?",
+        "Did you experience any <color=#FFFF66>other type\nof discomfort</color>?"
+    };
+
+    private System.Collections.IEnumerator RunPostBlockQuestionnaire()
+    {
+        postBlockQuestionIndex = 0;
+        postBlockResponses.Clear();
+
+        // Show black background
+        if (cueBgPanel == null)
+        {
+            Canvas canvas = uiCanvas;
+            cueBgPanel = new GameObject("CueBgPanel");
+            cueBgPanel.transform.SetParent(canvas != null ? canvas.transform : transform, false);
+            RectTransform bgrt = cueBgPanel.AddComponent<RectTransform>();
+            bgrt.anchorMin = Vector2.zero;
+            bgrt.anchorMax = Vector2.one;
+            bgrt.offsetMin = Vector2.zero;
+            bgrt.offsetMax = Vector2.zero;
+            Image bgImg = cueBgPanel.AddComponent<Image>();
+            bgImg.color = new Color(0f, 0f, 0f, 0.95f);
+        }
+        cueBgPanel.SetActive(true);
+        cueBgPanel.transform.SetAsLastSibling();
+        cuePanel.SetActive(true);
+        cuePanel.transform.SetAsLastSibling();
+
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("POST_BLOCK_QUESTIONNAIRE_START", $"block={blockNumber}");
+
+        // Cycle through questions
+        while (postBlockQuestionIndex < postBlockQuestions.Length)
+        {
+            postBlockRating = 5;
+            postBlockQuestionShowTime = Time.time;
+            bool answered = false;
+
+            // Wait 1 second before accepting input (prevents stale keypresses from prior screen)
+            yield return new WaitForSeconds(1.0f);
+
+            while (!answered)
+            {
+                // Update display
+                if (postBlockQuestionIndex < 4)
+                {
+                    // 1-10 rating questions
+                    cueText.text = BuildPostBlockQuestionText(postBlockQuestions[postBlockQuestionIndex]);
+                    
+                    // Check input
+                    for (int i = 1; i <= 9; i++)
+                    {
+                        if (Input.GetKeyDown(KeyCode.Alpha1 + (i - 1)) || Input.GetKeyDown(KeyCode.Keypad1 + (i - 1)))
+                        {
+                            postBlockRating = i;
+                            answered = true;
+                            break;
+                        }
+                    }
+                    if (Input.GetKeyDown(KeyCode.Alpha0) || Input.GetKeyDown(KeyCode.Keypad0))
+                    {
+                        postBlockRating = 10;
+                        answered = true;
+                    }
+                    if (Input.GetKeyDown(KeyCode.LeftArrow))
+                        postBlockRating = Mathf.Max(1, postBlockRating - 1);
+                    if (Input.GetKeyDown(KeyCode.RightArrow))
+                        postBlockRating = Mathf.Min(10, postBlockRating + 1);
+                    if (Input.GetKeyDown(KeyCode.Return) || Input.GetKeyDown(KeyCode.KeypadEnter))
+                        answered = true;
+                    // 30s timeout
+                    if (Time.time - postBlockQuestionShowTime > 30f)
+                        answered = true;
+                }
+                else
+                {
+                    // Yes/No question (last question)
+                    cueText.text = $"<size=28>{postBlockQuestions[postBlockQuestionIndex]}</size>\n\n" +
+                                   $"<size=36><color=#88FF88>Y = Yes</color>     <color=#FF8888>N = No</color></size>\n\n" +
+                                   $"<size=16><color=#AAAAAA>Press Y or N</color></size>";
+
+                    if (Input.GetKeyDown(KeyCode.Y))
+                    {
+                        postBlockRating = 1; // 1 = yes
+                        answered = true;
+                    }
+                    if (Input.GetKeyDown(KeyCode.N))
+                    {
+                        postBlockRating = 0; // 0 = no
+                        answered = true;
+                    }
+                    // 30s timeout = no
+                    if (Time.time - postBlockQuestionShowTime > 30f)
+                    {
+                        postBlockRating = 0;
+                        answered = true;
+                    }
+                }
+
+                yield return null;
+            }
+
+            // Record response
+            postBlockResponses.Add(postBlockRating);
+            string qName = postBlockQuestionIndex < 4 ? 
+                new string[] { "muscle_pain", "breathlessness", "physical_effort", "mental_effort" }[postBlockQuestionIndex] :
+                "other_discomfort";
+            
+            if (EventMarkerSender.Instance != null)
+                EventMarkerSender.Instance.SendEvent("POST_BLOCK_RESPONSE",
+                    $"question={qName},rating={postBlockRating},block={blockNumber}");
+            
+            Debug.Log($"[HillExperiment] Post-block Q{postBlockQuestionIndex + 1}: {qName} = {postBlockRating}");
+
+            postBlockQuestionIndex++;
+            
+            // Brief pause between questions
+            yield return new WaitForSeconds(0.3f);
+        }
+
+        // Log all responses
+        Debug.Log($"[HillExperiment] Post-block questionnaire complete: " +
+                  $"pain={postBlockResponses[0]}, breathlessness={postBlockResponses[1]}, " +
+                  $"physical_effort={postBlockResponses[2]}, mental_effort={postBlockResponses[3]}, " +
+                  $"other_discomfort={(postBlockResponses[4] == 1 ? "Yes" : "No")}");
+
+        if (EventMarkerSender.Instance != null)
+            EventMarkerSender.Instance.SendEvent("POST_BLOCK_QUESTIONNAIRE_END", $"block={blockNumber}");
+
+        // Write to CSV
+        WritePostBlockQuestionnaire();
+
+        // Hide overlay
+        cuePanel.SetActive(false);
+        if (cueBgPanel != null) cueBgPanel.SetActive(false);
+
+        // Show end-of-block summary on black screen (stays until game is restarted)
+        ShowEndOfBlockScreen();
+    }
+
+    private void ShowEndOfBlockScreen()
+    {
+        // Black background
+        if (cueBgPanel == null)
+        {
+            Canvas canvas = uiCanvas;
+            cueBgPanel = new GameObject("CueBgPanel");
+            cueBgPanel.transform.SetParent(canvas != null ? canvas.transform : transform, false);
+            RectTransform bgrt = cueBgPanel.AddComponent<RectTransform>();
+            bgrt.anchorMin = Vector2.zero;
+            bgrt.anchorMax = Vector2.one;
+            bgrt.offsetMin = Vector2.zero;
+            bgrt.offsetMax = Vector2.zero;
+            Image bgImg = cueBgPanel.AddComponent<Image>();
+            bgImg.color = new Color(0f, 0f, 0f, 1f);
+        }
+        cueBgPanel.SetActive(true);
+        cueBgPanel.transform.SetAsLastSibling();
+
+        float earnings = totalCoinsCollected * 0.10f;
+        string earningsText = group == ExperimentGroup.Reward ? 
+            $"\n\n<size=28>You earned: <color=#FFD700>{earnings:C2}</color> this block</size>" : "";
+
+        cueText.fontSize = 36;
+        cueText.text = $"<size=42>END OF BLOCK</size>{earningsText}\n\n<size=20><color=#888888>Please wait for the experimenter.</color></size>";
+        cuePanel.SetActive(true);
+        cuePanel.transform.SetAsLastSibling();
+
+        Debug.Log($"[HillExperiment] End of block screen shown. Earnings: {earnings:F2}");
+    }
+
+    private string BuildPostBlockQuestionText(string question)
+    {
+        string row = "";
+        for (int i = 1; i <= 10; i++)
+        {
+            if (i == postBlockRating)
+                row += $"<color=#FFD700><b>[{i}]</b></color>  ";
+            else
+                row += $"<color=#888888>{i}</color>  ";
+        }
+        float remaining = 30f - (Time.time - postBlockQuestionShowTime);
+        return $"<size=26>{question}</size>\n\n" +
+               $"<size=32>{row}</size>\n\n" +
+               $"<size=16><color=#AAAAAA>Press 1-10 or arrows + Enter ({remaining:F0}s)</color></size>";
+    }
+
+    private void WritePostBlockQuestionnaire()
+    {
+        string csvPath = System.IO.Path.Combine(
+            Application.persistentDataPath, "post_block_questionnaire.csv");
+
+        bool fileExists = System.IO.File.Exists(csvPath);
+
+        try
+        {
+            using (var w = new System.IO.StreamWriter(csvPath, append: true))
+            {
+                if (!fileExists)
+                    w.WriteLine("timestamp,participant_id,block,group,muscle_pain,breathlessness,physical_effort,mental_effort,other_discomfort");
+
+                string otherDiscomfort = postBlockResponses.Count > 4 ? (postBlockResponses[4] == 1 ? "yes" : "no") : "na";
+                w.WriteLine(
+                    $"{System.DateTime.Now:yyyy-MM-dd HH:mm:ss}," +
+                    $"{participantID},{blockNumber},{group}," +
+                    $"{(postBlockResponses.Count > 0 ? postBlockResponses[0] : 0)}," +
+                    $"{(postBlockResponses.Count > 1 ? postBlockResponses[1] : 0)}," +
+                    $"{(postBlockResponses.Count > 2 ? postBlockResponses[2] : 0)}," +
+                    $"{(postBlockResponses.Count > 3 ? postBlockResponses[3] : 0)}," +
+                    $"{otherDiscomfort}");
+            }
+            Debug.Log($"[HillExperiment] Post-block questionnaire saved → {csvPath}");
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[HillExperiment] Failed to write post-block questionnaire: {e.Message}");
+        }
+    }
+
+    private void ReturnToStartScreen()
+    {
+        // Try to show the start screen UI
+        StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true);
         if (startScreen != null)
         {
+            // Activate the entire chain
             startScreen.gameObject.SetActive(true);
-            startScreen.ShowStartScreenManual();
-            Debug.Log("[HillExperiment] Returned to participant entry screen");
+            Transform parent = startScreen.transform.parent;
+            while (parent != null)
+            {
+                parent.gameObject.SetActive(true);
+                parent = parent.parent;
+            }
+            
+            // Find and activate the start panel child
+            Transform startPanel = startScreen.transform.Find("StartScreenPanel");
+            if (startPanel != null) startPanel.gameObject.SetActive(true);
+            
+            // Try calling the show method
+            try
+            {
+                startScreen.ShowStartScreenManual();
+                Debug.Log("[HillExperiment] Returned to participant entry screen");
+                return;
+            }
+            catch (System.Exception e)
+            {
+                Debug.LogWarning($"[HillExperiment] ShowStartScreenManual failed: {e.Message}");
+            }
         }
-        else
-        {
-            TrialStarterUI starter = FindObjectOfType<TrialStarterUI>();
-            if (starter != null) starter.ShowStartPanel();
-        }
+        
+        // Fallback: show a simple "restart" message and pause
+        Debug.Log("[HillExperiment] Could not show start screen — showing restart prompt");
+        if (cueBgPanel != null) cueBgPanel.SetActive(true);
+        if (cueBgPanel != null) cueBgPanel.transform.SetAsLastSibling();
+        cueText.fontSize = 36;
+        cueText.text = "BLOCK COMPLETE\n\n<size=24>Please restart the application\nfor the next block.</size>";
+        cuePanel.SetActive(true);
+        cuePanel.transform.SetAsLastSibling();
+        Time.timeScale = 0f;
     }
     
     // === GUI ===
     
     private void OnGUI()
     {
+        // Only show debug info in the Unity Editor, not in builds
+        #if !UNITY_EDITOR
+        return;
+        #else
         if (!experimentRunning) return;
+        
+        // Hide debug info during full-screen question phases
+        if (currentPhase == Phase.RewardQuestion || currentPhase == Phase.RewardRating || 
+            currentPhase == Phase.PostClimbPain || currentPhase == Phase.BlockEnd ||
+            currentPhase == Phase.HillCue || currentPhase == Phase.Countdown)
+            return;
         
         int condIdx = currentConditionIndex < conditionOrder.Count ? conditionOrder[currentConditionIndex] : 0;
         HillCondition cond = condIdx < conditions.Count ? conditions[condIdx] : null;
@@ -1677,7 +2439,8 @@ public class HillClimbExperiment : MonoBehaviour
         GUI.Label(new Rect(x, y + 50, bw - 16, 16), $"Dist: {dist:F0}m / {hillLength:F0}m", info);
         
         if (noSpeedTimer > 2f)
-            GUI.Label(new Rect(x, y + 66, bw - 16, 16), $"⚠ No pedaling: {noSpeedTimer:F0}s / {quitTimeThreshold:F0}s", info);
+            GUI.Label(new Rect(x, y + 66, bw - 16, 16), $"!! No pedaling: {noSpeedTimer:F0}s / {quitTimeThreshold:F0}s", info);
+        #endif
     }
     
     private void OnDestroy()
