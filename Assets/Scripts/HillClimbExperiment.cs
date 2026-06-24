@@ -204,6 +204,10 @@ public class HillClimbExperiment : MonoBehaviour
         ElevationProfileBar startProfileBar = FindObjectOfType<ElevationProfileBar>(true);
         if (startProfileBar != null) startProfileBar.gameObject.SetActive(false);
         
+        // Disable the QuickStart helper that auto-creates a progress bar on Start
+        ElevationProgressBarQuickStart quickStart = FindObjectOfType<ElevationProgressBarQuickStart>(true);
+        if (quickStart != null) quickStart.enabled = false;
+        
         // Also disable any ContinuousProgressUI that might overlay
         ContinuousProgressUI contProgress = FindObjectOfType<ContinuousProgressUI>(true);
         if (contProgress != null) contProgress.gameObject.SetActive(false);
