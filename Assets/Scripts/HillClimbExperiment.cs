@@ -195,6 +195,10 @@ public class HillClimbExperiment : MonoBehaviour
         Debug.Log($"[HillExperiment] Ready. {conditions.Count} conditions. Hill={hillLength}m, Flat={flatApproachLength}m");
         Debug.Log($"[HillExperiment] Conditions: {string.Join(", ", conditions.Select(c => c.name))}");
         
+        // Hide elevation progress bar at startup — it blocks the start screen input
+        ElevationProgressBar startBar = FindObjectOfType<ElevationProgressBar>(true);
+        if (startBar != null) startBar.gameObject.SetActive(false);
+
         // Ensure HUD elements are visible from the start (speed, power, cadence, etc.)
         // These get hidden by some scripts during setup; force them on.
         EnableHUDElements();
@@ -2363,6 +2367,10 @@ public class HillClimbExperiment : MonoBehaviour
 
     private void ReturnToStartScreen()
     {
+        // Hide elevation progress bar so it doesn't block the start screen
+        ElevationProgressBar bar = FindObjectOfType<ElevationProgressBar>(true);
+        if (bar != null) bar.gameObject.SetActive(false);
+
         // Try to show the start screen UI
         StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true);
         if (startScreen != null)
