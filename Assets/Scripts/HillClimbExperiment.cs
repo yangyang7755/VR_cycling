@@ -2460,7 +2460,7 @@ public class HillClimbExperiment : MonoBehaviour
         WriteEarningsCSV();
         
         // Return to participant ID entry screen for next participant/block
-        StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true); // include inactive
+        //StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true); // include inactive
         if (startScreen != null)
         {
             // Activate the entire chain
