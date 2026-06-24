@@ -58,6 +58,8 @@ public class HillClimbExperiment : MonoBehaviour
     private float phaseStartTime;
     private float phaseStartDistance;
     private float noSpeedTimer = 0f; // tracks how long speed has been zero
+    private float lastPowerReading = 0f; // last observed power value
+    private float powerStuckTimer = 0f; // how long power has been at same value
     private bool rewardRatingConfirmed = false;
     private float rewardConfirmTime = 0f;
     private int rewardResponseCountAtStart = 0;
@@ -198,12 +200,53 @@ public class HillClimbExperiment : MonoBehaviour
         // Hide elevation progress bar at startup — it blocks the start screen input
         ElevationProgressBar startBar = FindObjectOfType<ElevationProgressBar>(true);
         if (startBar != null) startBar.gameObject.SetActive(false);
+        
+        ElevationProfileBar startProfileBar = FindObjectOfType<ElevationProfileBar>(true);
+        if (startProfileBar != null) startProfileBar.gameObject.SetActive(false);
+        
+        // Also disable any ContinuousProgressUI that might overlay
+        ContinuousProgressUI contProgress = FindObjectOfType<ContinuousProgressUI>(true);
+        if (contProgress != null) contProgress.gameObject.SetActive(false);
+
+        // Aggressively disable raycasting on any progress-related canvases
+        // (they may be created dynamically and block the start screen buttons)
+        StartCoroutine(DisableProgressBarsDelayed());
 
         // Ensure HUD elements are visible from the start (speed, power, cadence, etc.)
         // These get hidden by some scripts during setup; force them on.
         EnableHUDElements();
     }
     
+    /// <summary>
+    /// Delayed disable of progress bars — catches dynamically created UI after a few frames.
+    /// </summary>
+    private System.Collections.IEnumerator DisableProgressBarsDelayed()
+    {
+        // Wait several frames for all Start() methods to create their canvases
+        yield return null;
+        yield return null;
+        yield return null;
+        yield return null;
+
+        // Disable any canvas with "progress", "elevation", or "bar" in the name
+        foreach (var canvas in FindObjectsOfType<Canvas>(true))
+        {
+            string name = canvas.gameObject.name.ToLower();
+            if (name.Contains("progress") || name.Contains("elevation") || name.Contains("bar"))
+            {
+                canvas.gameObject.SetActive(false);
+            }
+        }
+
+        // Also directly disable the components again (in case they re-enabled)
+        ElevationProgressBar epb = FindObjectOfType<ElevationProgressBar>(true);
+        if (epb != null) epb.gameObject.SetActive(false);
+        ElevationProfileBar epfb = FindObjectOfType<ElevationProfileBar>(true);
+        if (epfb != null) epfb.gameObject.SetActive(false);
+        ContinuousProgressUI cpu = FindObjectOfType<ContinuousProgressUI>(true);
+        if (cpu != null) cpu.gameObject.SetActive(false);
+    }
+
     /// <summary>
     /// Enable all cycling HUD elements (speed, power, cadence, distance displays).
     /// Called at startup and when entering HillClimb phase.
@@ -537,6 +580,8 @@ public class HillClimbExperiment : MonoBehaviour
 
         coinsCollected = 0;
         noSpeedTimer = 0f;
+        powerStuckTimer = 0f;
+        lastPowerReading = 0f;
         postClimbPainShown = false;
         phaseStartTime = Time.time;
         phaseStartDistance = bikeController != null ? bikeController.GetDistance() : 0f;
@@ -1235,18 +1280,34 @@ public class HillClimbExperiment : MonoBehaviour
         if (Time.frameCount % 60 == 0)
             Debug.Log($"[HillClimb] dist={dist:F1}, phaseStart={phaseStartDistance:F1}, hillDist={hillDist:F1}, hillLength={hillLength:F1}");
         
-        // Quit detection: 5s no pedaling triggers a 10s countdown, then abandon
+        // Quit detection: stop pedalling detection
         // SKIP entirely in simulation mode
         // SKIP during flat approach (rider may not have started pedalling yet)
         bool pastFlatApproach = hillDist > flatApproachLength;
         
-        // Disengagement detection: speed < 3 km/h (coasting/stopped)
-        // Cadence is unreliable (sticks at last reported value from trainer)
-        bool notPedalling = (speed < quitSpeedThreshold);
+        // Disengagement detection: 
+        // 1. Speed < 3 km/h (coasting/stopped)
+        // 2. OR power stuck at same value for 5+ seconds (trainer data frozen)
+        float currentPower = bikeController != null ? bikeController.GetPower() : 0f;
+        
+        // Track stuck power
+        if (Mathf.Abs(currentPower - lastPowerReading) > 1f)
+        {
+            lastPowerReading = currentPower;
+            powerStuckTimer = 0f;
+        }
+        else
+        {
+            powerStuckTimer += Time.deltaTime;
+        }
+        
+        bool powerStuck = powerStuckTimer >= 5f && currentPower > 0f; // stuck at non-zero = frozen data
+        bool notPedalling = (speed < quitSpeedThreshold) || powerStuck;
         
         if (simulationModeActive)
         {
             noSpeedTimer = 0f; // Never accumulate in sim mode
+            powerStuckTimer = 0f;
         }
         else if (!pastFlatApproach)
         {
@@ -2367,9 +2428,15 @@ public class HillClimbExperiment : MonoBehaviour
 
     private void ReturnToStartScreen()
     {
-        // Hide elevation progress bar so it doesn't block the start screen
+        // Hide elevation progress bars so they don't block the start screen
         ElevationProgressBar bar = FindObjectOfType<ElevationProgressBar>(true);
         if (bar != null) bar.gameObject.SetActive(false);
+        
+        ElevationProfileBar profileBar = FindObjectOfType<ElevationProfileBar>(true);
+        if (profileBar != null) profileBar.gameObject.SetActive(false);
+        
+        ContinuousProgressUI contProgress = FindObjectOfType<ContinuousProgressUI>(true);
+        if (contProgress != null) contProgress.gameObject.SetActive(false);
 
         // Try to show the start screen UI
         StartScreenUI startScreen = FindObjectOfType<StartScreenUI>(true);
