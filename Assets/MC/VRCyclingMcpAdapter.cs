@@ -27,6 +27,28 @@ namespace Hapticare.MCP
         public int difficultyLevel = 1;
         public string terrain = "flat";
 
+        [Header("Experiment Events")]
+        [Tooltip("Current trial phase. Examples: baseline, hill, post_block_questionnaire, end.")]
+        public string trialPhase = "baseline";
+
+        [Tooltip("Condition label for GameData, for example coins, no_coins, hill_01.")]
+        public string conditionId = "";
+
+        [Tooltip("Distance from trial start in meters. Bind this from BikeController/route manager if available.")]
+        public float distanceM;
+
+        [Tooltip("Distance from trial start as 0-100 percent. Bind this from progress UI/route manager if available.")]
+        public float distancePct;
+
+        [Tooltip("Current cumulative coin/reward count, if the condition uses coins.")]
+        public int coins;
+
+        [Tooltip("When enabled, emits a prompt-due marker every effortPromptIntervalS. Actual answers must call SendEffortRating.")]
+        public bool publishEffortPromptEvents = true;
+
+        [Tooltip("Seconds between effort/pain questionnaire prompt markers.")]
+        public float effortPromptIntervalS = 30f;
+
         [Header("Incoming MCP Adaptation")]
         public int lastDifficultyDelta;
         public float lastSlopeBiasPct;
@@ -45,6 +67,9 @@ namespace Hapticare.MCP
         public float lastBikeTelemetryUnityTime;
 
         float nextSendTime;
+        float trialStartRealtime;
+        float nextEffortPromptTime;
+        int effortPromptIndex;
 
         void Awake()
         {
@@ -61,6 +86,8 @@ namespace Hapticare.MCP
                 bridge.gameId = gameId;
                 bridge.OnMessage += HandleMcpMessage;
             }
+            trialStartRealtime = Time.realtimeSinceStartup;
+            nextEffortPromptTime = Time.realtimeSinceStartup + Mathf.Max(5f, effortPromptIntervalS);
         }
 
         void OnDisable()
@@ -70,10 +97,17 @@ namespace Hapticare.MCP
 
         void Update()
         {
-            if (!enableMcpBridge || !publishUnityState || !bridge) return;
-            if (Time.time < nextSendTime) return;
-            nextSendTime = Time.time + 1f / Mathf.Max(1f, sendHz);
-            SendState();
+            if (!enableMcpBridge || !bridge) return;
+            if (publishUnityState && Time.time >= nextSendTime)
+            {
+                nextSendTime = Time.time + 1f / Mathf.Max(1f, sendHz);
+                SendState();
+            }
+            if (publishEffortPromptEvents && Time.realtimeSinceStartup >= nextEffortPromptTime)
+            {
+                SendEffortPromptDue("Pain/effort rating due");
+                nextEffortPromptTime = Time.realtimeSinceStartup + Mathf.Max(5f, effortPromptIntervalS);
+            }
         }
 
         public void SendState()
@@ -87,7 +121,110 @@ namespace Hapticare.MCP
                 + ",\"power_watts\":" + HapticareMcpUdpBridge.F(powerWatts)
                 + ",\"difficulty_level\":" + difficultyLevel
                 + ",\"terrain\":\"" + HapticareMcpUdpBridge.Escape(terrain) + "\""
+                + ",\"phase\":\"" + HapticareMcpUdpBridge.Escape(trialPhase) + "\""
+                + ",\"condition\":\"" + HapticareMcpUdpBridge.Escape(conditionId) + "\""
+                + ",\"elapsed_s\":" + HapticareMcpUdpBridge.F(ElapsedS())
+                + ",\"distance_m\":" + HapticareMcpUdpBridge.F(distanceM)
+                + ",\"distance_pct\":" + HapticareMcpUdpBridge.F(distancePct)
+                + ",\"coins\":" + coins
             );
+        }
+
+        public void SendGameStart(string phaseName = "baseline")
+        {
+            trialPhase = phaseName;
+            trialStartRealtime = Time.realtimeSinceStartup;
+            effortPromptIndex = 0;
+            nextEffortPromptTime = Time.realtimeSinceStartup + Mathf.Max(5f, effortPromptIntervalS);
+            SendVRGameEvent("trial_start", phaseName, distanceM, distancePct);
+        }
+
+        public void SendGameEnd(string phaseName = "end")
+        {
+            trialPhase = phaseName;
+            SendVRGameEvent("trial_end", phaseName, distanceM, distancePct);
+        }
+
+        public void SendAbandoned(string phaseName = "abandoned")
+        {
+            trialPhase = phaseName;
+            SendVRGameEvent("trial_abandoned", phaseName, distanceM, distancePct);
+        }
+
+        public void SendHillStart(string phaseName = "hill")
+        {
+            trialPhase = phaseName;
+            SendVRGameEvent("hill_start", phaseName, distanceM, distancePct);
+        }
+
+        public void SendHillEnd(string phaseName = "post_block_questionnaire")
+        {
+            trialPhase = phaseName;
+            SendVRGameEvent("hill_end", phaseName, distanceM, distancePct);
+        }
+
+        public void SendEffortPromptDue(string question = "Pain/effort rating due")
+        {
+            effortPromptIndex += 1;
+            SendVRGameEvent(
+                "effort_prompt_due",
+                trialPhase,
+                distanceM,
+                distancePct,
+                "\"prompt_id\":\"effort_" + effortPromptIndex.ToString("000") + "\""
+                + ",\"question\":\"" + HapticareMcpUdpBridge.Escape(question) + "\""
+            );
+        }
+
+        public void SendEffortRating(
+            string question,
+            string ratingName,
+            float ratingValue,
+            float scaleMin = 0f,
+            float scaleMax = 10f,
+            float responseTimeMs = -1f
+        )
+        {
+            SendVRGameEvent(
+                "effort_rating_answered",
+                trialPhase,
+                distanceM,
+                distancePct,
+                "\"prompt_id\":\"effort_" + Mathf.Max(1, effortPromptIndex).ToString("000") + "\""
+                + ",\"question\":\"" + HapticareMcpUdpBridge.Escape(question) + "\""
+                + ",\"rating_name\":\"" + HapticareMcpUdpBridge.Escape(ratingName) + "\""
+                + ",\"rating_value\":" + HapticareMcpUdpBridge.F(ratingValue)
+                + ",\"rating_scale_min\":" + HapticareMcpUdpBridge.F(scaleMin)
+                + ",\"rating_scale_max\":" + HapticareMcpUdpBridge.F(scaleMax)
+                + ",\"response_time_ms\":" + HapticareMcpUdpBridge.F(responseTimeMs)
+            );
+        }
+
+        public void SendVRGameEvent(string eventName, string phaseName = "", float distanceMeters = -1f, float distancePercent = -1f, string extraJsonFields = "")
+        {
+            if (!enableMcpBridge || !bridge) return;
+            string phase = string.IsNullOrEmpty(phaseName) ? trialPhase : phaseName;
+            float dM = distanceMeters >= 0f ? distanceMeters : distanceM;
+            float dPct = distancePercent >= 0f ? distancePercent : distancePct;
+            bridge.Send("vr.cycling.event",
+                "\"event\":\"" + HapticareMcpUdpBridge.Escape(eventName) + "\""
+                + ",\"phase\":\"" + HapticareMcpUdpBridge.Escape(phase) + "\""
+                + ",\"condition\":\"" + HapticareMcpUdpBridge.Escape(conditionId) + "\""
+                + ",\"elapsed_s\":" + HapticareMcpUdpBridge.F(ElapsedS())
+                + ",\"distance_m\":" + HapticareMcpUdpBridge.F(dM)
+                + ",\"distance_pct\":" + HapticareMcpUdpBridge.F(dPct)
+                + ",\"gradient_pct\":" + HapticareMcpUdpBridge.F(slopeGradePct)
+                + ",\"cadence_rpm\":" + HapticareMcpUdpBridge.F(cadenceRpm)
+                + ",\"speed_kmh\":" + HapticareMcpUdpBridge.F(speedKmh)
+                + ",\"power_watts\":" + HapticareMcpUdpBridge.F(powerWatts)
+                + ",\"coins\":" + coins
+                + (string.IsNullOrEmpty(extraJsonFields) ? "" : "," + extraJsonFields)
+            );
+        }
+
+        float ElapsedS()
+        {
+            return Mathf.Max(0f, Time.realtimeSinceStartup - trialStartRealtime);
         }
 
         void HandleMcpMessage(string type, string json)
