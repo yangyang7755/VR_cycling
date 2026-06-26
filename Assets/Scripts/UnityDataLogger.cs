@@ -115,7 +115,7 @@ public class UnityDataLogger : MonoBehaviour
         }
         
         // Create data folder
-        string folderPath = Path.Combine(Application.dataPath, "..", dataFolder);
+        string folderPath = Path.Combine(ExperimentDataPath.GetPath(), dataFolder);
         Directory.CreateDirectory(folderPath);
         
         // Create participant folder

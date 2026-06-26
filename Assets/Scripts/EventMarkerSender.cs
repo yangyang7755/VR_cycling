@@ -135,7 +135,7 @@ public class EventMarkerSender : MonoBehaviour
         // Setup log file
         if (logToFile)
         {
-            logFilePath = System.IO.Path.Combine(Application.persistentDataPath, logFileName);
+            logFilePath = System.IO.Path.Combine(ExperimentDataPath.GetPath(), logFileName);
             try
             {
                 using (var w = new System.IO.StreamWriter(logFilePath, false))

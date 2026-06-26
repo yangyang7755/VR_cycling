@@ -439,8 +439,11 @@ public class HillClimbExperiment : MonoBehaviour
         results.Clear();
         experimentRunning = true;
         
+        // Setup data path hierarchy: ~/Desktop/ExperimentData/<PID>/Block_<N>/
+        ExperimentDataPath.SetSession(participantID, blockNumber);
+        
         // Setup log file
-        logFilePath = System.IO.Path.Combine(Application.persistentDataPath,
+        logFilePath = System.IO.Path.Combine(ExperimentDataPath.GetPath(),
             $"hill_experiment_{participantID}_B{blockNumber}_{System.DateTime.Now:yyyyMMdd_HHmmss}.csv");
         trialLogWriter = new System.IO.StreamWriter(logFilePath, false);
         trialLogWriter.WriteLine("timestamp,condition,gradient,rolling,phase,distance,speed,power,cadence,hr,pain_vas,gradient_current,coins,event");
@@ -2119,7 +2122,7 @@ public class HillClimbExperiment : MonoBehaviour
 
     /// <summary>
     /// Appends one row to the shared participant_earnings.csv file.
-    /// File lives in Application.persistentDataPath so it survives across sessions.
+    /// File lives in ExperimentDataPath.GetPath() so it survives across sessions.
     /// Each coin = £0.10. Row is appended so all participants / blocks accumulate in one place.
     /// Columns: timestamp, participant_id, block, group, conditions_completed,
     ///          coins_collected, coins_possible, earnings_gbp
@@ -2132,7 +2135,7 @@ public class HillClimbExperiment : MonoBehaviour
         float earningsGbp       = totalCoinsCollected * poundPerCoin;
 
         string csvPath = System.IO.Path.Combine(
-            Application.persistentDataPath, "participant_earnings.csv");
+            ExperimentDataPath.GetParticipantPath(), "participant_earnings.csv");
 
         bool fileExists = System.IO.File.Exists(csvPath);
 
@@ -2401,7 +2404,7 @@ public class HillClimbExperiment : MonoBehaviour
     private void WritePostBlockQuestionnaire()
     {
         string csvPath = System.IO.Path.Combine(
-            Application.persistentDataPath, "post_block_questionnaire.csv");
+            ExperimentDataPath.GetParticipantPath(), "post_block_questionnaire.csv");
 
         bool fileExists = System.IO.File.Exists(csvPath);
 
